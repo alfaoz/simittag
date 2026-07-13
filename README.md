@@ -1,87 +1,196 @@
-# simittag
+Simittag
+========
+Simittag is a circular visual fiducial system. Each tag carries a data payload (1–11 bytes, Reed-Solomon protected) and provides full 6-DoF pose estimation from a single detection. This repository contains the Python reference implementation and a dependency-free Rust port of the detector, which also builds to WebAssembly.
 
-circular fiducial marker. one tag gives you a decoded payload plus the full 6-dof camera pose.
+A detection either returns a CRC-verified payload or nothing. There is no unverified output and no temporal filtering: every frame stands on its own.
 
-## how it works
+Table of Contents
+=================
+- [Overview](#overview)
+- [Choosing a Variant](#choosing-a-variant)
+- [Install](#install)
+- [Usage](#usage)
+  - [Generating Tags](#generating-tags)
+  - [Getting Started with the Detector](#getting-started-with-the-detector)
+    - [Python](#python)
+    - [Rust](#rust)
+    - [WebAssembly](#webassembly)
+  - [Payload Modes](#payload-modes)
+  - [Pose Estimation](#pose-estimation)
+  - [Lens Distortion](#lens-distortion)
+- [Performance](#performance)
+- [Comparison with Other Fiducial Systems](#comparison-with-other-fiducial-systems)
+- [Implementation Notes](#implementation-notes)
+- [Support](#support)
 
-concentric rings, center out: black bullseye, quiet ring, a few rings of data sectors, quiet ring, black outer ring. the detector finds the outer ring, fits an ellipse to it, gets the pose from the conic, then samples the data cells in grayscale and runs reed-solomon. you either get a crc-verified payload or nothing. never a maybe.
+Overview
+========
+A Simittag consists of concentric rings, read from the center out: a black bullseye disk, a quiet ring, several rings of data sectors, a quiet ring, and a black outer ring. The detector locates the outer ring with an adaptive threshold and contour analysis, fits an ellipse to it with sub-pixel refinement, recovers the pose from the conic, and samples the data grid in grayscale. Weak cells are passed to the Reed-Solomon decoder as erasures rather than hard guesses, and a CRC8 rejects false positives.
 
-## where this sits, honestly
+The innermost data ring is a fixed sync sequence. Rotation is recovered by a single circular cross-correlation against it, so no search over the error-correction code is needed, and the detector can identify the variant automatically: a wrong variant's sync fails to correlate, and the CRC confirms the winner.
 
-- apriltag out-ranges this by about 2.2x. same print size, same camera, same degradation, real head-to-head. square corners are just more pixel-efficient than a ring. if all you need is tracking, use apriltag.
-- datamatrix packs more bytes into the same area. squares tile, rings don't.
+Choosing a Variant
+==================
+All three variants share the same radial layout, so detection and pose estimation are identical. They differ only in the data grid.
 
-so why bother: neither of those gives you data *and* pose from one mark. datamatrix has no pose at all, apriltag carries a handful of bits. simittag does both, and reads fine at steep angles.
-
-vs the code cantag actually shipped in 2005: real RS over GF(256) with erasure support plus a crc (cantag had parity bits), grayscale soft sampling instead of one hard pixel per cell, sub-pixel ring edges, adaptive thresholding.
-
-## variants
-
-same rings, same detection, same pose math. only the data grid changes.
-
-| variant | grid | payload | ids | corrects |
+| Variant | Grid | Payload | Distinct IDs | Corrects |
 |:-:|:-:|:-:|:-:|:-:|
-| **T** | 3×16 | 1 B | 256 | 1 err / 1 eras |
-| **M** | 4×24 | 4 B | 16.7 M | 2 err / 3 eras |
-| **D** | 5×36 | 11 B | a lot | 3 err / 5 eras |
+| T | 3×16 | 1 byte | 256 | 1 error / 1 erasure |
+| M | 4×24 | 4 bytes | 16.7 M | 2 errors / 3 erasures |
+| D | 5×36 | 11 bytes | 2⁸⁸ | 3 errors / 5 erasures |
 
-T when you want range, D when you want bytes, M otherwise. the innermost data ring is a sync sequence, so rotation comes from one circular correlation, and the detector can tell the variants apart on its own (the wrong variant's sync doesn't correlate, and the crc settles it).
+Some heuristics:
+1. If you need maximum detection distance or expect motion blur, use T. Fewer, larger cells survive the most degradation.
+2. If you need more than an ID — text, namespaces, or coordinates — use D.
+3. Otherwise use M.
 
-payload modes: plain id, raw bytes, tagged (namespace + id so two deployments don't collide), and geo — lat/lon/alt packed into 10 bytes, D only. a geo tag knows where it is, so a single detection tells the camera where *it* is, in the world. there is no url mode on purpose.
+You can pin the detector to a single variant for speed, or let it auto-detect.
 
-## numbers
+Install
+=======
+Python (reference implementation, requires `numpy` and `opencv-python`):
 
-all measured on degraded renders (blur, noise, lighting, lens distortion, motion) against ground truth, then checked on a real webcam. no temporal filtering anywhere. if a frame fails, it fails.
+```
+git clone https://github.com/alfaoz/simittag.git
+cd simittag
+pip install numpy opencv-python
+```
 
-- pose, variant M, tilts 0–70°: tilt error 0.01–0.03°, full rotation 0.07°, depth 0.04%, center ~0.6 px.
-- range, A4 print, 1080p, 60° lens: T ~7 m, M ~6 m, D ~5 m. scales linearly with resolution and print size. (apriltag: ~14.5 m. see above.)
-- motion blur: a ~180 px T tag survives 20 px of smear, D about 9. holds up on a simulated 6 m/s conveyor with a 0.2 ms strobe.
-- lens distortion: uncorrected k1=−0.25 near the frame edge loses 20% of decodes and reads rotation 9.5° wrong. pass `dist=` to `detect()` and it's back to pinhole numbers.
+Rust (no external dependencies):
 
-## python and rust
+```
+cd rust
+cargo build --release
+```
 
-the python package (`simittag/`, `marker/`) is the reference. the rust port (`rust/`) is the one you ship — no opencv, no dependencies, every cv2/numpy call reimplemented by hand and checked against golden fixtures in `fixtures/`. the fixtures are the python implementation's exact outputs; rust has to reproduce them and never calls python.
+This produces the `simittag` CLI at `rust/target/release/simittag`. The core library (`simittag-core`) has an optional `parallel` feature (rayon) which the release build enables.
 
-current gates: codec bit-exact, 10k randomized codec cases with identical decisions, pose geometry to 1e-9, imaging stages bitwise, 124/124 candidate sets within 0.1 px, 126/126 frames with identical decode decisions and pose diff under 1e-4.
+WebAssembly: see [WebAssembly](#webassembly) below.
 
-things that turned out to matter for the port: cv2's 8-bit gaussian blur is a fixed-point path, fitEllipse had to be ported line-for-line from opencv 4.13, undistort emulates the quantized CV_16SC2 remap bit-exact, and findContours is suzuki–abe with the full hierarchy because the nesting tree is what the frontend walks.
+Usage
+=====
 
-speed, 1280² frame with six tags: ~9 ms native (rayon), ~15 ms threaded wasm, ~35 ms single-thread wasm. the 14-thread opencv/python reference needs 65 ms on the same frame.
+## Generating Tags
 
-## use
-
-```bash
+```
 python -m marker.generate --variant M --id 0x1234 --out tag.png
-python app.py decode photo.png
 ```
 
-rust:
+or via the small CLI app:
 
-```bash
-cd rust && cargo build --release
-./target/release/simittag detect frame.png
-./target/release/simittag parity-spec ../fixtures/spec.json   # and the other gates
+```
+python app.py encode --id 12345 --out tag.png
+python app.py encode --raw "hi" --out tag.png
 ```
 
-wasm builds (both single-thread and threaded) land in `rust/dist/`:
+`marker/svg.py` generates SVG output that matches the raster generator cell-for-cell, for printing at exact physical scale. Print tags with a white quiet zone around the outer ring; the detector needs the ring's outer edge to contrast cleanly against its surroundings.
 
-```bash
+## Getting Started with the Detector
+
+### Python
+
+```python
+import cv2
+from simittag import detect
+from simittag.spec import DEFAULT
+
+gray = cv2.imread("frame.png", cv2.IMREAD_GRAYSCALE)
+results = detect.detect(gray, DEFAULT)
+
+for r in results:
+    print(r["mode"], r["value"], r["center"], r["tilt_deg_approx"])
+```
+
+Pass `K=` (a 3×3 intrinsics matrix) for metrically correct pose; decoding works without it.
+
+### Rust
+
+```
+./rust/target/release/simittag detect frame.png
+```
+
+or use `simittag-core` as a library. The CLI also provides `bench`, a `serve` mode that accepts raw grayscale frames on stdin for harness integration, and the parity gates described under [Implementation Notes](#implementation-notes).
+
+### WebAssembly
+
+```
 rust/build-wasm.sh
 ```
 
-the threaded build needs nightly, build-std, explicit shared-memory link args, and a cross-origin-isolated page to run on. it took a while to get right. the script comments explain all of it — read them before changing anything.
+builds two variants into `rust/dist/`: `wasm/` (single-threaded, SIMD) and `wasm-mt/` (threaded via wasm-bindgen-rayon). The module exposes `detect(gray, w, h, fx, fy, cx, cy, versions, poseOnly)` returning JSON.
 
-## layout
+The threaded build requires nightly Rust with `build-std`, explicit shared-memory linker arguments, and a cross-origin-isolated page (COOP `same-origin`, COEP `credentialless`) to run on. These requirements are non-obvious and all documented in the build script; read its comments before modifying it.
 
+## Payload Modes
+
+T tags are headerless: the byte is a raw ID. M and D payloads start with a one-byte header (version and mode):
+
+* `ID` — a big-endian unsigned integer. The default.
+* `RAW` — opaque bytes or short text.
+* `TAGGED` — a namespace byte plus an ID, so independent deployments do not collide.
+* `GEO` (D only) — latitude, longitude, and altitude packed into 10 bytes. A GEO tag knows its own position, so a single detection gives the camera its absolute position in the world.
+
+Unknown future modes decode as verified raw bytes, never a misparse. There is deliberately no URL mode.
+
+## Pose Estimation
+
+Every decoded detection includes the pose recovered from the conic. The translation is in units of the marker's outer-ring radius: multiply by the physical radius in meters to get metric translation. The tag size is measured across the outer edge of the black outer ring.
+
+Coordinate system: the camera frame has its origin at the camera center, z pointing out of the lens, x right and y down in the image. The tag frame is centered on the tag; from the viewer's perspective, x is to the right, y is down, and z points into the tag surface.
+
+A note on ambiguity: an ellipse alone admits two pose interpretations (the circular equivalent of planar pose ambiguity). The detector evaluates both candidate homographies and selects using the decoded data grid and reprojection consistency. The two solutions converge as the tag approaches fronto-parallel, where the ambiguity is harmless by construction.
+
+Accuracy, measured against ground truth on realistically degraded renders (variant M, tilts 0–70°, median): 0.01–0.03° tilt error, 0.07° full rotation error, 0.04% depth error, ~0.6 px center reprojection.
+
+## Lens Distortion
+
+The conic pose assumes a pinhole camera. Under radial distortion an off-center circle is not an ellipse, and the pose is silently biased — worst with wide lenses and tags near the frame edge. Pass distortion coefficients to correct for this:
+
+```python
+detect.detect(gray, DEFAULT, K=K, dist=(k1, k2, p1, p2, k3))
 ```
-simittag/   spec, GF(256) RS codec, payload modes, detector
-marker/     png + svg generators
-rust/       simittag-core, simittag-cli (gates + bench), simittag-wasm
-fixtures/   pinned reference outputs, the parity contract
-```
 
-every python module self-tests: `python -m simittag.codec` etc.
+The frame is undistorted once with cached maps. Measured with a typical webcam lens (k1 = −0.25) and the tag near the edge: uncorrected loses 20% of decodes and reads rotation 9.5° wrong; corrected is indistinguishable from the pinhole control.
 
-## license
+Performance
+===========
+On an M-series laptop, 1280×1280 frame containing six tags, auto-detect:
 
-tbd.
+| Detector | Time |
+|---|---:|
+| Rust native (rayon) | ~9 ms |
+| WASM, threaded (8 workers) | ~15 ms |
+| WASM, single-thread + SIMD | ~35 ms |
+| Python reference (OpenCV, 14 threads) | ~65 ms |
+
+Detection range, A4-printed tag (175 mm ring), 1080p camera, 60° lens, mild blur/noise, ≥90% decode rate: T ~7 m, M ~6 m, D ~5 m. Range scales linearly with camera resolution and print size.
+
+Motion blur degrades gracefully to a cliff: a ~180 px T tag decodes through 20 px of smear, D through 9 px. Verified on a simulated 6 m/s conveyor with a 0.2 ms strobe.
+
+Comparison with Other Fiducial Systems
+======================================
+Measured head-to-head under identical print size, camera, and degradation:
+
+* **AprilTag** (tag36h11) out-ranges Simittag-T by roughly 2.2× (~14.5 m vs ~6.5 m at 1080p). This is architectural: square corners and a square bit grid are more pixel-efficient than a ring. If you only need long-range tracking, use AprilTag.
+* **DataMatrix / QR** pack more bytes per area — squares tile, rings do not — but provide no pose.
+
+Simittag's niche is the combination: a useful payload and full 6-DoF pose from one circular mark, readable at steep angles.
+
+Implementation Notes
+====================
+The Python package is the reference; the Rust port is what ships. Every OpenCV/NumPy operation the detector uses is re-implemented by hand in Rust and verified against golden fixtures (`fixtures/`) — the reference implementation's exact outputs. Rust never calls Python. The parity gates, runnable via the CLI:
+
+| Gate | Command | Status |
+|---|---|---|
+| Spec and codec vectors | `parity-spec`, `parity-codec` | bit-exact |
+| 10,000 randomized codec cases | `cross-gen` | identical decisions |
+| Conic pose geometry | `parity-geometry` | agrees to 1e-9 |
+| Imaging stages (blur, threshold, contours, fitEllipse) | `parity-stages` | bitwise |
+| Candidate sets, all frames | `parity-candidates` | 124/124 within 0.1 px |
+| Full detector decisions and pose | `parity-detect` | 126/126, pose diff < 1e-4 |
+
+Port details that turned out to matter: OpenCV's 8-bit Gaussian blur is a fixed-point code path; `fitEllipse` is ported line-for-line from OpenCV 4.13, since all tuned thresholds were calibrated against that exact fit; undistortion reproduces the quantized CV_16SC2 remap bit-exactly; contour extraction is Suzuki–Abe with the full hierarchy, because the detector walks the nesting tree.
+
+Support
+=======
+Please open an issue on this repository for questions.
