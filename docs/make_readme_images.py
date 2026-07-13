@@ -189,6 +189,7 @@ def make_detection():
         cv2.rectangle(img, (bx - 12, by - th - 10), (bx + tw + 12, by + 12),
                       badge_bg, -1)
         cv2.putText(img, label, (bx, by), FONT, 0.78, badge_fg, 2, cv2.LINE_AA)
+    img = cv2.resize(img, (1200, 864), interpolation=cv2.INTER_AREA)
     save("detections.png", img)
 
 
