@@ -35,9 +35,9 @@ The detector never returns unverified data. Every payload is checked against a C
 
 The innermost data ring holds a fixed synchronization pattern. The tag's rotation is recovered by correlating against this pattern once. The same mechanism lets the detector identify the variant automatically, because the wrong variant's pattern fails to correlate.
 
-<img src="docs/images/detection.png" alt="Detector output on a test frame" width="640">
+<img src="docs/images/detections.png" alt="Detector output on a test frame" width="760">
 
-Detector output on one of the test frames. The ellipse and axes are drawn from the recovered pose. The labels show the decoded payloads.
+Detector output on a test frame. The ellipse, axes, and tilt are drawn from the recovered pose. The labels show the decoded payloads.
 
 Choosing a Variant
 ==================

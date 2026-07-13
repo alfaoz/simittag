@@ -109,14 +109,63 @@ def make_anatomy():
 
 
 # ---------------------------------------------------------------- detection
+def _rot(tilt, lean, spin):
+    """Marker-plane rotation: in-plane spin, then tilt about a leaned axis."""
+    def rz(a):
+        c, s = np.cos(a), np.sin(a)
+        return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1.0]])
+
+    def ry(a):
+        c, s = np.cos(a), np.sin(a)
+        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+
+    return rz(np.deg2rad(lean)) @ ry(np.deg2rad(tilt)) @ rz(np.deg2rad(spin))
+
+
 def make_detection():
-    entries = json.load(open(os.path.join(ROOT, "fixtures", "frames.json")))["entries"]
-    e = next(x for x in entries if "multitag_mixed6" in x["file"])
-    gray = cv2.imread(os.path.join(ROOT, "fixtures", e["file"]), 0)
-    K = np.array(e["K"]).reshape(3, 3)
+    W, H = 1500, 1080
+    f = 0.9 * W
+    K = np.array([[f, 0, W / 2 - 0.5], [0, f, H / 2 - 0.5], [0, 0, 1.0]])
+    Z = 6.9  # camera distance in outer-radius units
+
+    # variant, id, tilt deg, tilt lean deg, in-plane spin deg, chip center
+    scene = [(T_SPEC, 0x2A, 10, 160, 25, (255, 305)),
+             (M_SPEC, 0x53494D, 26, 80, 0, (750, 300)),
+             (D_SPEC, 0x1234, 40, 115, 50, (1245, 310)),
+             (T_SPEC, 0x7, 0, 0, 10, (250, 800)),
+             (M_SPEC, 0xF0F0F, 56, 95, 70, (750, 810)),
+             (D_SPEC, 0xABCDEF, 30, 140, 30, (1250, 795))]
+
+    rng = np.random.default_rng(7)
+    canvas = np.full((H, W), 252.0)
+    for sp, val, tilt, lean, spin, (cx, cy) in scene:
+        ms = 720
+        m = render(payload.encode_id(val, sp), sp, size=ms).astype(np.float64)
+        Rm = (ms / 2) * (1 - MARGIN)
+        # image px -> marker coords (radius 1.0), then marker plane -> pixels
+        S = np.array([[1 / Rm, 0, -ms / 2 / Rm], [0, 1 / Rm, -ms / 2 / Rm],
+                      [0, 0, 1.0]])
+        R = _rot(tilt, lean, spin)
+        t = np.array([(cx - K[0, 2]) / f * Z, (cy - K[1, 2]) / f * Z, Z])
+        P = K @ np.column_stack((R[:, 0], R[:, 1], t))
+        Hm = P @ S
+        warped = cv2.warpPerspective(m, Hm, (W, H), flags=cv2.INTER_AREA,
+                                     borderValue=255)
+        mask = cv2.warpPerspective(np.ones_like(m), Hm, (W, H),
+                                   flags=cv2.INTER_AREA, borderValue=0)
+        canvas = mask * warped + (1 - mask) * canvas
+    canvas = cv2.GaussianBlur(canvas, (0, 0), 0.9)
+    canvas += rng.normal(0, 2.5, canvas.shape)
+    gray = np.clip(canvas, 0, 255).astype(np.uint8)
+
     dets = detect.detect_markers(gray, K=K)
+    assert len(dets) == 6 and all(d["decoded"] for d in dets), \
+        f"expected 6 decoded tags, got {[(d['variant'], d['decoded']) for d in dets]}"
 
     img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    ring = (144, 238, 144)
+    axis_colors = ((54, 67, 244), (80, 175, 76), (255, 144, 30))  # x, y, z
+    badge_bg, badge_fg = (28, 28, 28), (120, 240, 120)
 
     def project(X):
         x = K @ X
@@ -125,23 +174,22 @@ def make_detection():
     for d in dets:
         cx, cy = d["center"]
         ax, ay = d["axes"]
-        cv2.ellipse(img, (int(cx), int(cy)), (int(ax / 2), int(ay / 2)),
-                    d["angle"], 0, 360, (0, 200, 0), 2, cv2.LINE_AA)
+        cv2.ellipse(img, (int(cx), int(cy)), (int(ax / 2) + 4, int(ay / 2) + 4),
+                    d["angle"], 0, 360, ring, 6, cv2.LINE_AA)
         R, t = np.array(d["R"]), np.array(d["t"])
         o = project(t)
-        for axis, color in ((0, (60, 60, 230)), (1, (60, 200, 60)),
-                            (2, (230, 130, 40))):
+        for axis, color in zip(range(3), axis_colors):
             v = np.zeros(3)
-            v[axis] = 0.6
-            cv2.line(img, o, project(R @ v + t), color, 3, cv2.LINE_AA)
-        if d["decoded"]:
-            label = f'{d["variant"]} 0x{d["value"]:X}' if d["mode"] == "ID" \
-                else f'{d["variant"]} {d["value"]}'
-            org = (int(cx - ax / 2), int(cy - ay / 2) - 12)
-            cv2.putText(img, label, org, FONT, 0.9, (0, 0, 0), 5, cv2.LINE_AA)
-            cv2.putText(img, label, org, FONT, 0.9, (255, 255, 255), 2,
-                        cv2.LINE_AA)
-    save("detection.png", img)
+            v[axis] = 0.7
+            cv2.line(img, o, project(R @ v + t), color, 7, cv2.LINE_AA)
+        label = f'SIMITTAG-{d["variant"]} 0x{d["value"]:x}  tilt {d["tilt_deg"]:.0f} deg'
+        (tw, th), _ = cv2.getTextSize(label, FONT, 0.78, 2)
+        bx = int(cx - tw / 2)
+        by = int(cy - ay / 2) - 34
+        cv2.rectangle(img, (bx - 12, by - th - 10), (bx + tw + 12, by + 12),
+                      badge_bg, -1)
+        cv2.putText(img, label, (bx, by), FONT, 0.78, badge_fg, 2, cv2.LINE_AA)
+    save("detections.png", img)
 
 
 # ---------------------------------------------------------------- tag size
