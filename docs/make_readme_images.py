@@ -217,8 +217,51 @@ def make_tag_size():
     save("tag_size.png", canvas)
 
 
+# ---------------------------------------------------------------- wordmark
+def make_wordmark():
+    """Eight T tags whose raw bytes are the ASCII letters of SIMITTAG."""
+    from simittag import codec
+    from marker.svg import marker_svg_body
+
+    word = "SIMITTAG"
+    size, gap, pad = 360, 64, 40
+    W = pad * 2 + len(word) * size + (len(word) - 1) * gap
+    H = pad * 2 + size
+    canvas = np.full((H, W), 255, np.uint8)
+    for i, ch in enumerate(word):
+        g = render(payload.encode_id(ord(ch), T_SPEC), T_SPEC, size=size)
+        x = pad + i * (size + gap)
+        canvas[pad:pad + size, x:x + size] = g
+    save("wordmark.png", cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR))
+
+    dets = detect.detect_markers(canvas)
+    dets = sorted((d for d in dets if d["decoded"]), key=lambda d: d["center"][0])
+    got = "".join(chr(d["value"]) for d in dets)
+    assert got == word, f"wordmark decodes as {got!r}"
+    print("wordmark decodes as", got)
+
+    # SVG, in mm: 40 mm tags, geometry identical to the raster
+    D, gmm, pmm = 40.0, 7.0, 4.0
+    Wm = pmm * 2 + len(word) * D + (len(word) - 1) * gmm
+    Hm = pmm * 2 + D
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{Wm:.2f}mm" '
+        f'height="{Hm:.2f}mm" viewBox="0 0 {Wm:.3f} {Hm:.3f}">',
+        f'<rect x="0" y="0" width="{Wm:.3f}" height="{Hm:.3f}" fill="#fff"/>',
+    ]
+    for i, ch in enumerate(word):
+        grid = codec.encode(payload.encode_id(ord(ch), T_SPEC), T_SPEC)
+        cx = pmm + i * (D + gmm) + D / 2
+        parts.append(marker_svg_body(grid, T_SPEC, cx, pmm + D / 2, D / 2))
+    parts.append("</svg>")
+    path = os.path.join(OUT, "wordmark.svg")
+    open(path, "w").write("\n".join(parts))
+    print("wrote", path)
+
+
 if __name__ == "__main__":
     make_variants()
     make_anatomy()
     make_detection()
     make_tag_size()
+    make_wordmark()
