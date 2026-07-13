@@ -21,7 +21,7 @@ Table of Contents
 - [Performance](#performance)
 - [Comparison with Other Fiducial Systems](#comparison-with-other-fiducial-systems)
 - [Implementation Notes](#implementation-notes)
-- [Support](#support)
+- [License](#license)
 
 Overview
 ========
@@ -182,7 +182,7 @@ Simittag's niche is the combination. One circular mark provides both a useful pa
 
 Implementation Notes
 ====================
-The Python package is the reference implementation. The Rust port is the one to ship. Every OpenCV and NumPy operation the detector depends on was re-implemented by hand in Rust and verified against golden fixtures in `fixtures/`. The fixtures are the reference implementation's exact outputs. Rust never calls Python.
+Use the Rust detector in production. The Python package defines the correct behavior of the format and the detector, and exists for reference, experimentation, and regenerating the test fixtures. Every OpenCV and NumPy operation the detector depends on was re-implemented by hand in Rust and verified against golden fixtures in `fixtures/`. The fixtures are the Python implementation's exact outputs. Rust never calls Python.
 
 The parity gates run through the command-line tool:
 
@@ -197,6 +197,6 @@ The parity gates run through the command-line tool:
 
 A few porting details mattered more than expected. OpenCV's 8-bit Gaussian blur runs on a fixed-point code path. The ellipse fit had to be ported line-for-line from OpenCV 4.13, because every tuned threshold in the detector was calibrated against that exact fit. Undistortion reproduces OpenCV's quantized remap bit-exactly. Contour extraction is Suzuki-Abe with the full hierarchy, because the detector walks the nesting tree.
 
-Support
+License
 =======
-Please open an issue on this repository for questions.
+TBD.
