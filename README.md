@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> Simittag is currently quite early and experimental. We would advise to not use simittag for crucial infrastructure.
+
 Simittag
 ========
 Simittag is a circular visual fiducial system. Each tag carries a data payload and can be used to estimate the full 6-DoF pose of the camera. This repository contains the Python reference implementation and a Rust port of the detector. The Rust port has no dependencies and also builds to WebAssembly.
