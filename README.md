@@ -86,7 +86,7 @@ python app.py encode --raw "hi" --out tag.png
 python app.py decode photo.png
 ```
 
-The SVG generator in `marker/svg.py` produces the same geometry as the raster generator. Use it when you need to print at an exact physical size. Leave a white quiet zone around the outer ring when printing. The detector needs the ring's outer edge to contrast cleanly against the background.
+The SVG generator in `marker/svg.py` produces the same geometry as the raster generator. It is important to leave a white quiet zone around the outer ring when printing, preferably square, but not necessary for high performance.
 
 ## Getting Started with the Detector
 
@@ -157,7 +157,7 @@ The frame is undistorted once, with cached maps. With a typical webcam lens and 
 
 Performance
 ===========
-Timings for a 1280×1280 frame containing six tags, variant auto-detection on, measured on an M-series laptop:
+Timings for a 1280x1280 frame containing six tags, variant auto-detection on, measured on a modern ARM processor:
 
 | Detector | Time |
 |---|---:|
@@ -166,36 +166,19 @@ Timings for a 1280×1280 frame containing six tags, variant auto-detection on, m
 | WASM, single-thread + SIMD | ~35 ms |
 | Python reference (OpenCV, 14 threads) | ~65 ms |
 
-Detection range for a tag printed on A4 paper, with a 1080p camera and a 60 degree lens, at a 90% decode rate: about 7 m for T, 6 m for M, and 5 m for D. Range scales linearly with camera resolution and print size.
-
-Motion blur degrades detection gracefully up to a cliff. A T tag 180 px across decodes through 20 px of smear. A D tag of the same size decodes through 9 px.
+> Detection range is not properly tested as of 13-Jul-2026
 
 Comparison with Other Fiducial Systems
 ======================================
-We measured these head-to-head, with identical print size, camera, and image degradation.
+We did some head-to-head testing with identical print size, camera, and image degradation.
 
-AprilTag out-ranges Simittag by roughly 2.2×. The reason is architectural. Square corners and a square bit grid use pixels more efficiently than a ring. If you only need long-range tracking, use AprilTag.
+AprilTag out-ranges Simittag by roughly 2x.
 
 DataMatrix and QR codes store more bytes in the same area, because squares tile and rings do not. They provide no pose.
 
-Simittag's niche is the combination. One circular mark provides both a useful payload and a full 6-DoF pose, and it reads correctly at steep angles.
-
 Implementation Notes
 ====================
-Use the Rust detector in production. The Python package defines the correct behavior of the format and the detector, and exists for reference, experimentation, and regenerating the test fixtures. Every OpenCV and NumPy operation the detector depends on was re-implemented by hand in Rust and verified against golden fixtures in `fixtures/`. The fixtures are the Python implementation's exact outputs. Rust never calls Python.
-
-The parity gates run through the command-line tool:
-
-| Gate | Command | Status |
-|---|---|---|
-| Spec and codec vectors | `parity-spec`, `parity-codec` | bit-exact |
-| 10,000 randomized codec cases | `cross-gen` | identical decisions |
-| Conic pose geometry | `parity-geometry` | agrees to 1e-9 |
-| Imaging stages | `parity-stages` | bitwise |
-| Candidate sets, all frames | `parity-candidates` | 124/124 within 0.1 px |
-| Full detector decisions and pose | `parity-detect` | 126/126, pose diff < 1e-4 |
-
-A few porting details mattered more than expected. OpenCV's 8-bit Gaussian blur runs on a fixed-point code path. The ellipse fit had to be ported line-for-line from OpenCV 4.13, because every tuned threshold in the detector was calibrated against that exact fit. Undistortion reproduces OpenCV's quantized remap bit-exactly. Contour extraction is Suzuki-Abe with the full hierarchy, because the detector walks the nesting tree.
+Its advised that the Rust detector is used production. The Python package defines the correct behavior of the format and the detector, and exists for reference, experimentation, and regenerating the test fixtures.
 
 License
 =======
