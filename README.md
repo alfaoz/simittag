@@ -4,6 +4,8 @@ Simittag is a circular visual fiducial system. Each tag carries a data payload a
 
 Tags come in three variants. We recommend the M variant unless you have a specific reason to choose otherwise.
 
+<img src="docs/images/variants.png" alt="The three Simittag variants" width="760">
+
 Table of Contents
 =================
 - [Overview](#overview)
@@ -27,9 +29,15 @@ Overview
 ========
 A Simittag is made of concentric rings. From the center out these are a black bullseye disk, a quiet ring, several rings of data cells, another quiet ring, and a black outer ring. The detector finds the outer ring and fits an ellipse to it. The pose is recovered from that ellipse. The data cells are then sampled in grayscale and decoded with Reed-Solomon error correction. Cells the sampler is not confident about are passed to the decoder as erasures rather than guesses.
 
+<img src="docs/images/anatomy.png" alt="The rings of a Simittag" width="680">
+
 The detector never returns unverified data. Every payload is checked against a CRC before it is reported, and a tag that fails the check is simply not reported. There is also no temporal filtering. Every frame is detected on its own.
 
 The innermost data ring holds a fixed synchronization pattern. The tag's rotation is recovered by correlating against this pattern once. The same mechanism lets the detector identify the variant automatically, because the wrong variant's pattern fails to correlate.
+
+<img src="docs/images/detection.png" alt="Detector output on a test frame" width="640">
+
+Detector output on one of the test frames. The ellipse and axes are drawn from the recovered pose. The labels show the decoded payloads.
 
 Choosing a Variant
 ==================
@@ -137,7 +145,9 @@ Payloads with an unknown mode decode as verified raw bytes. They are never mispa
 
 ## Pose Estimation
 
-Every decoded detection includes the tag's pose. The translation is expressed in units of the tag's outer-ring radius. Multiply by the physical radius in meters to get metric translation. Tag size is measured across the outer edge of the black outer ring.
+Every decoded detection includes the tag's pose. The translation is expressed in units of the tag's outer-ring radius. Multiply by the physical radius in meters to get metric translation. Tag size is measured across the outer edge of the black outer ring, as shown below.
+
+<img src="docs/images/tag_size.png" alt="Where tag size is measured" width="520">
 
 The camera frame has its origin at the camera center. The z-axis points out of the lens, x is to the right in the image, and y is down. The tag frame is centered on the tag. From the viewer's perspective, x is to the right, y is down, and z points into the tag surface.
 
