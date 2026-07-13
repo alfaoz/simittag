@@ -120,7 +120,7 @@ Decoding works without camera calibration. For a metrically correct pose, pass y
 ./rust/target/release/simittag detect frame.png
 ```
 
-You can also use the `simittag-core` crate as a library. The command-line tool additionally provides a benchmark mode, a serve mode that reads raw grayscale frames from stdin, and the parity gates described under [Implementation Notes](#implementation-notes).
+You can also use the `simittag-core` crate as a library.
 
 ### WebAssembly
 
@@ -188,7 +188,7 @@ DataMatrix and QR codes store more bytes in the same area, because squares tile 
 
 Implementation Notes
 ====================
-Its advised that the Rust detector is used production. The Python package defines the correct behavior of the format and the detector, and exists for reference, experimentation, and regenerating the test fixtures.
+It's advised that the Rust detector is used production. The Python package defines the correct behavior of the format and the detector, and exists for reference, experimentation, and regenerating the test fixtures.
 
 License
 =======
