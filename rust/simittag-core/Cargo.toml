@@ -1,0 +1,20 @@
+# The core is dependency-free BY DEFAULT: everything in it must compile to
+# wasm32-unknown-unknown with nothing but std, and every numeric routine is a
+# from-scratch port gated against fixtures/ (the Python implementation's golden
+# outputs). No opencv crate (C++ bindings, no WASM), no nalgebra, no rand.
+#
+# The optional `parallel` feature adds rayon row/candidate parallelism. It is
+# parity-safe by construction: work is split at row / candidate boundaries, so
+# per-row and per-candidate arithmetic order is untouched (the gates re-run
+# green with it enabled). Native CLI enables it; wasm only in the -mt build
+# (needs atomics + a wasm-bindgen-rayon thread pool).
+[package]
+name = "simittag-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+parallel = ["dep:rayon"]
+
+[dependencies]
+rayon = { version = "1.10", optional = true }

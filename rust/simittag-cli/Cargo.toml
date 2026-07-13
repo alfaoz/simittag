@@ -1,0 +1,15 @@
+[package]
+name = "simittag-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+simittag-core = { path = "../simittag-core", features = ["parallel"] }
+# arbitrary_precision: fixture ints exceed u64 (D IDs are 80-bit) and floats
+# must be compared from their exact literals, not a lossy f64 pre-parse
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+png = "0.17"
+
+[[bin]]
+name = "simittag"
+path = "src/main.rs"

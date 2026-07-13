@@ -1,0 +1,647 @@
+//! The full detector: detect.py's sampling, decode search, sub-pixel edge
+//! refinement, full-grid phase refinement, and detect_markers assembly.
+//! Gate: identical decode decisions on the fixture frames + pose within
+//! ±0.05 deg tilt / ±0.1% depth of the Python reference.
+
+use crate::codec;
+use crate::fitellipse::fit_ellipse_pts;
+use crate::frontend::{find_marker_ellipses, Candidate};
+use crate::image::{sharpen, Gray};
+use crate::mat::{self, M3, V3};
+use crate::payload::{self, Value};
+use crate::pose::{self, EllipseGeom};
+use crate::spec::MarkerSpec;
+
+pub struct Detection {
+    pub center: (f64, f64),
+    pub axes: (f64, f64),
+    pub angle: f64,
+    pub r: M3,
+    pub t: V3,
+    pub h: M3, // chosen homography (marker plane -> pixels), what pose derives from
+    pub tilt_deg: f64,
+    pub decoded: Option<(&'static str, &'static str, Value)>, // (variant, mode, value)
+}
+
+// ---------------------------------------------------------------------------
+// sampling through a homography (detect._project + _sample_many semantics)
+// ---------------------------------------------------------------------------
+
+#[inline]
+fn project(h: &M3, x: f64, y: f64) -> (f64, f64) {
+    let px = h[0][0] * x + h[0][1] * y + h[0][2];
+    let py = h[1][0] * x + h[1][1] * y + h[1][2];
+    let pw = h[2][0] * x + h[2][1] * y + h[2][2];
+    if pw.abs() < 1e-12 {
+        (f64::NAN, f64::NAN)
+    } else {
+        (px / pw, py / pw)
+    }
+}
+
+/// Vectorized-bilinear equivalent: returns (value, valid). Invalid samples get
+/// the same clamped-extrapolated junk value Python computes (it is never used
+/// behind a valid mask, but keeping it identical keeps every branch identical).
+#[inline]
+fn sample(img: &Gray, x: f64, y: f64) -> (f64, bool) {
+    let finite = x.is_finite() && y.is_finite();
+    let xf = if finite { x } else { -1.0 };
+    let yf = if finite { y } else { -1.0 };
+    let x0 = xf.floor() as i64;
+    let y0 = yf.floor() as i64;
+    let w = img.w as i64;
+    let h = img.h as i64;
+    let valid = finite && x0 >= 0 && y0 >= 0 && x0 + 1 < w && y0 + 1 < h;
+    let x0c = x0.clamp(0, w - 2);
+    let y0c = y0.clamp(0, h - 2);
+    let fx = xf - x0c as f64;
+    let fy = yf - y0c as f64;
+    let i = (y0c * w + x0c) as usize;
+    let v = img.px[i] as f64 * (1.0 - fx) * (1.0 - fy)
+        + img.px[i + 1] as f64 * fx * (1.0 - fy)
+        + img.px[i + img.w] as f64 * (1.0 - fx) * fy
+        + img.px[i + img.w + 1] as f64 * fx * fy;
+    (v, valid)
+}
+
+fn rotate_h(h: &M3, dphi: f64) -> M3 {
+    let (s, c) = dphi.sin_cos();
+    let rz: M3 = [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]];
+    mat::matmul(h, &rz)
+}
+
+fn scale_h(h: &M3, s: f64) -> M3 {
+    let d: M3 = [[s, 0.0, 0.0], [0.0, s, 0.0], [0.0, 0.0, 1.0]];
+    mat::matmul(h, &d)
+}
+
+// ---------------------------------------------------------------------------
+// cell sample patterns (decode 3x3; denser-angular for the phase refine)
+// ---------------------------------------------------------------------------
+
+pub struct SamplePattern {
+    xy: Vec<(f64, f64)>, // (rings * sectors * sub), cell-major
+    sub: usize,
+    rho_q: f64,
+}
+
+// Patterns are pure functions of the (static) specs; building them per
+// candidate was measurable in profiles. OnceLock pairs = (decode, refine).
+static PATTERNS: std::sync::OnceLock<Vec<(&'static str, SamplePattern, SamplePattern)>> =
+    std::sync::OnceLock::new();
+
+fn patterns_for(spec: &MarkerSpec) -> (&'static SamplePattern, &'static SamplePattern) {
+    let all = PATTERNS.get_or_init(|| {
+        crate::spec::variants()
+            .iter()
+            .map(|sp| (sp.name, cell_sample_points(sp), refine_sample_points(sp)))
+            .collect()
+    });
+    let e = all.iter().find(|(n, _, _)| *n == spec.name).unwrap();
+    (&e.1, &e.2)
+}
+
+fn cell_sample_points(spec: &MarkerSpec) -> SamplePattern {
+    let (_, ring_c, _) = spec.ring_radii();
+    let step = 2.0 * std::f64::consts::PI / spec.sector_count as f64;
+    let dr_step = ring_c[1] - ring_c[0];
+    let drs = [-0.25, 0.0, 0.25];
+    let dps = [-0.3 * step, 0.0, 0.3 * step];
+    let mut xy = Vec::with_capacity(spec.ring_count * spec.sector_count * 9);
+    for ring in 0..spec.ring_count {
+        for s in 0..spec.sector_count {
+            let phi0 = (s as f64 + 0.5) * step;
+            // meshgrid indexing="ij": dr-major
+            for &dr in &drs {
+                for &dp in &dps {
+                    let rho = ring_c[ring] + dr * dr_step;
+                    let phi = phi0 + dp;
+                    xy.push((rho * phi.cos(), rho * phi.sin()));
+                }
+            }
+        }
+    }
+    SamplePattern {
+        xy,
+        sub: 9,
+        rho_q: (spec.r_bullseye + spec.r_data_in) / 2.0,
+    }
+}
+
+fn refine_sample_points(spec: &MarkerSpec) -> SamplePattern {
+    let (_, ring_c, _) = spec.ring_radii();
+    let step = 2.0 * std::f64::consts::PI / spec.sector_count as f64;
+    let dr_step = ring_c[1] - ring_c[0];
+    let drs = [-0.25, 0.0, 0.25];
+    let n_ang = ((step.to_degrees() / 2.0).clamp(7.0, 13.0) as usize) | 1;
+    let dps: Vec<f64> = (0..n_ang)
+        .map(|i| (-0.38 + 0.76 * i as f64 / (n_ang - 1) as f64) * step)
+        .collect();
+    let mut xy = Vec::with_capacity(spec.ring_count * spec.sector_count * 3 * n_ang);
+    for ring in 0..spec.ring_count {
+        for s in 0..spec.sector_count {
+            for &dr in &drs {
+                for &dp in &dps {
+                    let rho = ring_c[ring] + dr * dr_step;
+                    let phi = (s as f64 + 0.5) * step + dp;
+                    xy.push((rho * phi.cos(), rho * phi.sin()));
+                }
+            }
+        }
+    }
+    SamplePattern {
+        xy,
+        sub: 3 * n_ang,
+        rho_q: 0.0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// _build_grid
+// ---------------------------------------------------------------------------
+
+fn build_grid(
+    gray: &Gray,
+    h: &M3,
+    spec: &MarkerSpec,
+    pat: &SamplePattern,
+) -> Option<(Vec<u8>, Vec<f32>)> {
+    let (bx, by) = project(h, 0.0, 0.0);
+    let (qx, qy) = project(h, pat.rho_q, 0.0);
+    let (bv, bok) = sample(gray, bx, by);
+    let (qv, qok) = sample(gray, qx, qy);
+    if !bok || !qok || (qv - bv).abs() < 20.0 {
+        return None;
+    }
+    let (black, white) = (bv, qv);
+    let mid = 0.5 * (black + white);
+    let span = (white - black).abs() / 2.0;
+    let ncells = spec.ring_count * spec.sector_count;
+    let mut grid = vec![0u8; ncells];
+    let mut conf = vec![0f32; ncells];
+    for cell in 0..ncells {
+        let mut sum = 0f64;
+        let mut cnt = 0usize;
+        for k in 0..pat.sub {
+            let (x, y) = pat.xy[cell * pat.sub + k];
+            let (px, py) = project(h, x, y);
+            let (v, ok) = sample(gray, px, py);
+            if ok {
+                sum += v;
+                cnt += 1;
+            }
+        }
+        if cnt == 0 {
+            return None;
+        }
+        let m = sum / cnt as f64;
+        grid[cell] = (m < mid) as u8;
+        conf[cell] = (((m - mid).abs() / span).min(1.0)) as f32;
+    }
+    Some((grid, conf))
+}
+
+// ---------------------------------------------------------------------------
+// _refine_phase
+// ---------------------------------------------------------------------------
+
+fn refine_phase(
+    gray: &Gray,
+    hbase: &M3,
+    spec: &MarkerSpec,
+    theta0: f64,
+    ref_grid: &[u8],
+    pat: &SamplePattern,
+) -> f64 {
+    let step = 2.0 * std::f64::consts::PI / spec.sector_count as f64;
+    let ncells = spec.ring_count * spec.sector_count;
+    let refv: Vec<f64> = ref_grid.iter().map(|&b| if b > 0 { -1.0 } else { 1.0 }).collect();
+    let ref_norm: f64 = (ncells as f64).sqrt(); // all entries are +-1
+
+    let corr = |ths: &[f64]| -> Option<Vec<f64>> {
+        let mut out = Vec::with_capacity(ths.len());
+        for &th in ths {
+            let (s, c) = th.sin_cos();
+            let mut m = vec![0f64; ncells];
+            for cell in 0..ncells {
+                let mut sum = 0f64;
+                let mut cnt = 0usize;
+                for k in 0..pat.sub {
+                    let (x, y) = pat.xy[cell * pat.sub + k];
+                    let (xr, yr) = (x * c - y * s, x * s + y * c);
+                    let (px, py) = project(hbase, xr, yr);
+                    let (v, ok) = sample(gray, px, py);
+                    if ok {
+                        sum += v;
+                        cnt += 1;
+                    }
+                }
+                if cnt == 0 {
+                    return None;
+                }
+                m[cell] = sum / cnt as f64;
+            }
+            let mean: f64 = m.iter().sum::<f64>() / ncells as f64;
+            let mut dot = 0f64;
+            let mut nrm = 0f64;
+            for i in 0..ncells {
+                let d = m[i] - mean;
+                dot += d * refv[i];
+                nrm += d * d;
+            }
+            let nm = nrm.sqrt() * ref_norm;
+            out.push(if nm > 1e-6 { dot / nm.max(1e-9) } else { -2.0 });
+        }
+        Some(out)
+    };
+
+    let lin = |a: f64, b: f64, n: usize| -> Vec<f64> {
+        (0..n).map(|i| a + (b - a) * i as f64 / (n - 1) as f64).collect()
+    };
+    let ths1: Vec<f64> = lin(theta0 - 0.5 * step, theta0 + 0.5 * step, 13);
+    let cs1 = match corr(&ths1) {
+        Some(v) => v,
+        None => return theta0,
+    };
+    let mut pk = 0usize;
+    for (i, &v) in cs1.iter().enumerate() {
+        if v > cs1[pk] {
+            pk = i;
+        }
+    }
+    let t_pk = ths1[pk];
+    let ths2: Vec<f64> = lin(t_pk - step / 10.0, t_pk + step / 10.0, 13);
+    let cs2 = match corr(&ths2) {
+        Some(v) => v,
+        None => return t_pk,
+    };
+    // least-squares quadratic over the whole fine window
+    let mut a = Vec::with_capacity(13 * 3);
+    for &th in &ths2 {
+        let x = th - t_pk;
+        a.extend_from_slice(&[x * x, x, 1.0]);
+    }
+    let (coef, _) = crate::fitellipse::lstsq(&a, 13, 3, &cs2);
+    let (a2, a1) = (coef[0], coef[1]);
+    if a2 < -1e-9 {
+        let v = t_pk - a1 / (2.0 * a2);
+        if ths2[0] <= v && v <= ths2[12] {
+            return v;
+        }
+    }
+    let mut pk2 = 0usize;
+    for (i, &v) in cs2.iter().enumerate() {
+        if v > cs2[pk2] {
+            pk2 = i;
+        }
+    }
+    ths2[pk2]
+}
+
+// ---------------------------------------------------------------------------
+// _refine_ellipse
+// ---------------------------------------------------------------------------
+
+fn refine_ellipse(gray: &Gray, geom: &EllipseGeom) -> Option<EllipseGeom> {
+    const N_RAYS: usize = 128;
+    const NS: usize = 13;
+    let a = geom.major / 2.0;
+    let b = geom.minor / 2.0;
+    let th = geom.angle_deg.to_radians();
+    let (s, c) = th.sin_cos();
+    let w = (0.25 * a.min(b)).clamp(1.5, 3.0);
+    let step = 2.0 * w / (NS - 1) as f64;
+
+    let mut pxs: Vec<f64> = Vec::with_capacity(N_RAYS);
+    let mut pys: Vec<f64> = Vec::with_capacity(N_RAYS);
+    let mut n_ok = 0usize;
+    for ray in 0..N_RAYS {
+        let t = ray as f64 / N_RAYS as f64 * 2.0 * std::f64::consts::PI;
+        let (st, ct) = t.sin_cos();
+        let ex = geom.cx + a * ct * c - b * st * s;
+        let ey = geom.cy + a * ct * s + b * st * c;
+        let mut nx = ct / a * c - st / b * s;
+        let mut ny = ct / a * s + st / b * c;
+        let nn = (nx * nx + ny * ny).sqrt();
+        nx /= nn;
+        ny /= nn;
+        let mut vals = [0f64; NS];
+        let mut all_valid = true;
+        for k in 0..NS {
+            let off = -w + step * k as f64;
+            let (v, ok) = sample(gray, ex + off * nx, ey + off * ny);
+            vals[k] = v;
+            all_valid &= ok;
+        }
+        // derivative at midpoints; first max (np.argmax)
+        let mut best = 0usize;
+        let mut dmax = vals[1] - vals[0];
+        for k in 1..NS - 1 {
+            let d = vals[k + 1] - vals[k];
+            if d > dmax {
+                dmax = d;
+                best = k;
+            }
+        }
+        let ok = all_valid && best > 0 && best < NS - 2 && dmax > 4.0;
+        if !ok {
+            continue;
+        }
+        n_ok += 1;
+        let y0 = vals[best] - vals[best - 1];
+        let y2 = vals[best + 2] - vals[best + 1];
+        let denom = y0 - 2.0 * dmax + y2;
+        let mut delta = if denom.abs() > 1e-9 {
+            0.5 * (y0 - y2) / denom
+        } else {
+            0.0
+        };
+        if !delta.is_finite() {
+            delta = 0.0;
+        }
+        delta = delta.clamp(-1.0, 1.0);
+        let offs_i = -w + step * best as f64;
+        let pos = offs_i + 0.5 * step + delta * step;
+        pxs.push(ex + pos * nx);
+        pys.push(ey + pos * ny);
+    }
+    if n_ok < 32 {
+        // max(12, 128 // 4)
+        return None;
+    }
+    let pts: Vec<(f32, f32)> = pxs
+        .iter()
+        .zip(&pys)
+        .map(|(&x, &y)| (x as f32, y as f32))
+        .collect();
+    let r = fit_ellipse_f32(&pts);
+    // sanity: big jump or axis-ratio blowup means it latched onto clutter
+    let jump = ((r.cx - geom.cx).powi(2) + (r.cy - geom.cy).powi(2)).sqrt();
+    if jump > 0.05 * a.max(b) + 1.0
+        || !(0.8..1.25).contains(&(r.major / geom.major))
+        || !(0.8..1.25).contains(&(r.minor / geom.minor))
+    {
+        return None;
+    }
+    Some(r)
+}
+
+fn fit_ellipse_f32(pts: &[(f32, f32)]) -> EllipseGeom {
+    // cv2.fitEllipse on a float32 array goes down the same Point2f path
+    fit_ellipse_pts(pts)
+}
+
+// ---------------------------------------------------------------------------
+// _try_decode_spec
+// ---------------------------------------------------------------------------
+
+pub struct DecodeHit {
+    pub variant: &'static str,
+    pub mode: &'static str,
+    pub value: Value,
+    pub chosen_h: M3,
+}
+
+fn try_decode_spec(
+    gray: &Gray,
+    hs: &[M3],
+    spec: &'static MarkerSpec,
+    conf_erasure: f32,
+) -> Option<DecodeHit> {
+    let step = 2.0 * std::f64::consts::PI / spec.sector_count as f64;
+    let (pat, rpat) = patterns_for(spec);
+    let sync_min = 0.70 * spec.sector_count as f64;
+    for h in hs {
+        for &scale in &[1.0, 1.06, 1.12, 0.94] {
+            let hs_ = scale_h(h, scale);
+            for k in 0..6 {
+                let phi0 = step * k as f64 / 6.0;
+                let (grid, conf) = match build_grid(gray, &rotate_h(&hs_, phi0), spec, pat) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                if spec.has_sync {
+                    let (_, scores) = codec::find_rotation(&grid[..spec.sector_count], spec);
+                    if (*scores.iter().max().unwrap() as f64) < sync_min {
+                        continue;
+                    }
+                }
+                let erasure: Vec<bool> = conf.iter().map(|&cv| cv < conf_erasure).collect();
+                let (pb, sh) = codec::decode(&grid, spec, Some(&erasure));
+                if let Some(pb) = pb {
+                    let theta0 = phi0 + sh as f64 * step;
+                    let ref_grid = codec::encode(&pb, spec).unwrap();
+                    let refined = refine_phase(gray, &hs_, spec, theta0, &ref_grid, rpat);
+                    let d = (refined - theta0 + std::f64::consts::PI)
+                        .rem_euclid(2.0 * std::f64::consts::PI)
+                        - std::f64::consts::PI;
+                    let theta = theta0 + d;
+                    let chosen_h = rotate_h(&hs_, theta);
+                    let (mode, value) = match payload::decode(&pb, spec) {
+                        Ok((m, v)) => (m, v),
+                        Err(_) => ("?", Value::Bytes(pb)),
+                    };
+                    return Some(DecodeHit {
+                        variant: spec.name,
+                        mode,
+                        value,
+                        chosen_h,
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// detect_markers
+// ---------------------------------------------------------------------------
+
+pub fn detect_markers(
+    gray_raw: &Gray,
+    k: &M3,
+    specs: &[&'static MarkerSpec],
+    conf_erasure: f32,
+    pose_only: bool,
+    dist: Option<&[f64]>,
+) -> Vec<Detection> {
+    let undistorted;
+    let gray_in = match dist {
+        Some(d) => {
+            undistorted = crate::image::undistort(gray_raw, k, d);
+            &undistorted
+        }
+        None => gray_raw,
+    };
+    let gray = sharpen(gray_in, 0.6, 1.0);
+    let cands: Vec<Candidate> = find_marker_ellipses(&gray);
+    // per-candidate work is independent; map preserves candidate order, so the
+    // result is identical to the sequential loop (parity gates re-run green)
+    let process = |cand: &Candidate| -> Option<Detection> {
+        let geom0 = cand.outer;
+        let refined = refine_ellipse(&gray, &geom0);
+        let geom1 = refined.unwrap_or(geom0);
+        let mut hs = pose::pose_homographies(&geom1, k);
+        let mut hs_coarse = if refined.is_some() && geom1.major.max(geom1.minor) < 100.0 {
+            pose::pose_homographies(&geom0, k)
+        } else {
+            Vec::new()
+        };
+        if hs.is_empty() {
+            return None;
+        }
+        if let Some(inner) = &cand.inner {
+            let origin_err = |h: &M3| -> f64 {
+                let hinv = mat::inv3(h);
+                let p = mat::matvec(&hinv, &[inner.cx, inner.cy, 1.0]);
+                ((p[0] / p[2]).powi(2) + (p[1] / p[2]).powi(2)).sqrt()
+            };
+            hs.sort_by(|a, b| origin_err(a).partial_cmp(&origin_err(b)).unwrap());
+            hs_coarse.sort_by(|a, b| origin_err(a).partial_cmp(&origin_err(b)).unwrap());
+        }
+        hs.extend(hs_coarse);
+        let mut hit = None;
+        for sp in specs {
+            hit = try_decode_spec(&gray, &hs, sp, conf_erasure);
+            if hit.is_some() {
+                break;
+            }
+        }
+        let mut geom_rep = geom1;
+        // circular-sticker fallback: outer contour failed to decode; retry at
+        // the largest suppressed round child (the tag ring inside a label)
+        if hit.is_none() {
+            if let Some(alt) = &cand.alt {
+                let alt1 = refine_ellipse(&gray, alt).unwrap_or(*alt);
+                let mut hs_alt = pose::pose_homographies(&alt1, k);
+                if let Some(inner) = &cand.inner {
+                    let origin_err = |h: &M3| -> f64 {
+                        let hinv = mat::inv3(h);
+                        let p = mat::matvec(&hinv, &[inner.cx, inner.cy, 1.0]);
+                        ((p[0] / p[2]).powi(2) + (p[1] / p[2]).powi(2)).sqrt()
+                    };
+                    hs_alt.sort_by(|a, b| origin_err(a).partial_cmp(&origin_err(b)).unwrap());
+                }
+                for sp in specs {
+                    hit = try_decode_spec(&gray, &hs_alt, sp, conf_erasure);
+                    if hit.is_some() {
+                        geom_rep = alt1; // report the TAG's geometry
+                        break;
+                    }
+                }
+            }
+        }
+        if hit.is_none() && (cand.inner.is_none() || !pose_only) {
+            return None;
+        }
+        let chosen_h = hit.as_ref().map(|h| h.chosen_h).unwrap_or(hs[0]);
+        let (r, t) = pose::decompose_h(&chosen_h, k);
+        Some(Detection {
+            center: (geom_rep.cx, geom_rep.cy),
+            axes: (geom_rep.major, geom_rep.minor),
+            angle: geom_rep.angle_deg,
+            r,
+            t,
+            h: chosen_h,
+            tilt_deg: pose::tilt_from_h(&chosen_h, k),
+            decoded: hit.map(|h| (h.variant, h.mode, h.value)),
+        })
+    };
+    #[cfg(feature = "parallel")]
+    let mut out: Vec<Detection> = {
+        use rayon::prelude::*;
+        cands.par_iter().filter_map(process).collect()
+    };
+    #[cfg(not(feature = "parallel"))]
+    let mut out: Vec<Detection> = cands.iter().filter_map(process).collect();
+    // de-dup: keep the larger-radius detection within a center-proximity cluster
+    out.sort_by(|a, b| {
+        b.axes.0.max(b.axes.1).partial_cmp(&a.axes.0.max(a.axes.1)).unwrap()
+    });
+    let mut kept: Vec<Detection> = Vec::new();
+    for d in out {
+        let r0 = d.axes.0.max(d.axes.1) / 2.0;
+        let ok = kept.iter().all(|kd| {
+            ((d.center.0 - kd.center.0).powi(2) + (d.center.1 - kd.center.1).powi(2)).sqrt()
+                > 0.4 * r0
+        });
+        if ok {
+            kept.push(d);
+        }
+    }
+    kept
+}
+
+/// detect.py's headless `detect()`: decoded markers ONLY, no dedup, no pose-only
+/// boxes -- what the validation harnesses (sweep/pose/range) consume.
+pub fn detect(
+    gray_raw: &Gray,
+    k: &M3,
+    specs: &[&'static MarkerSpec],
+    conf_erasure: f32,
+    dist: Option<&[f64]>,
+) -> Vec<Detection> {
+    let undistorted;
+    let gray_in = match dist {
+        Some(d) => {
+            undistorted = crate::image::undistort(gray_raw, k, d);
+            &undistorted
+        }
+        None => gray_raw,
+    };
+    let gray = sharpen(gray_in, 0.6, 1.0);
+    let cands = find_marker_ellipses(&gray);
+    let process = |cand: &Candidate| -> Option<Detection> {
+        let geom0 = cand.outer;
+        let refined = refine_ellipse(&gray, &geom0);
+        let geom1 = refined.unwrap_or(geom0);
+        let mut hs = pose::pose_homographies(&geom1, k);
+        if refined.is_some() && geom1.major.max(geom1.minor) < 100.0 {
+            hs.extend(pose::pose_homographies(&geom0, k));
+        }
+        if hs.is_empty() {
+            return None;
+        }
+        let mut found: Option<(DecodeHit, EllipseGeom)> = None;
+        for sp in specs {
+            if let Some(hit) = try_decode_spec(&gray, &hs, sp, conf_erasure) {
+                found = Some((hit, geom1));
+                break;
+            }
+        }
+        if found.is_none() {
+            if let Some(alt) = &cand.alt {
+                // circular-sticker fallback (see detect_markers)
+                let alt1 = refine_ellipse(&gray, alt).unwrap_or(*alt);
+                let hs_alt = pose::pose_homographies(&alt1, k);
+                for sp in specs {
+                    if let Some(hit) = try_decode_spec(&gray, &hs_alt, sp, conf_erasure) {
+                        found = Some((hit, alt1));
+                        break;
+                    }
+                }
+            }
+        }
+        found.map(|(hit, g)| {
+            let (r, t) = pose::decompose_h(&hit.chosen_h, k);
+            Detection {
+                center: (g.cx, g.cy),
+                axes: (g.major, g.minor),
+                angle: g.angle_deg,
+                r,
+                t,
+                h: hit.chosen_h,
+                tilt_deg: pose::tilt_from_h(&hit.chosen_h, k),
+                decoded: Some((hit.variant, hit.mode, hit.value)),
+            }
+        })
+    };
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        cands.par_iter().filter_map(process).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    cands.iter().filter_map(process).collect()
+}

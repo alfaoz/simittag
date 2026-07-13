@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["simittag-core", "simittag-cli", "simittag-wasm"]
+
+[profile.release]
+lto = true
+opt-level = 3
