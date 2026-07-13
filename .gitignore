@@ -5,3 +5,4 @@ __pycache__/
 rust/target/
 rust/dist/
 marker.png
+docs/make_readme_images.py
