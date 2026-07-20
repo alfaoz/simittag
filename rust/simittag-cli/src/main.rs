@@ -973,6 +973,39 @@ fn main() {
         Some("cross-gen") => {
             cross_gen(args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10000))
         }
+        // detect <image.png> [variant] [fov_deg] -- decode a frame, one JSON
+        // line per decoded tag. Without calibration the pose is approximate
+        // (default K assumes the given horizontal FOV, 60 deg like the Python
+        // reference's default_K); decoding itself is K-robust.
+        Some("detect") => {
+            use simittag_core::{detector, spec};
+            let path = args.get(2).expect("usage: simittag detect <image.png> [variant] [fov_deg]");
+            let src = read_png_gray(path);
+            let fov: f64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(60.0);
+            let f = (src.w as f64 / 2.0) / (fov.to_radians() / 2.0).tan();
+            let k = [
+                [f, 0.0, (src.w as f64 - 1.0) / 2.0],
+                [0.0, f, (src.h as f64 - 1.0) / 2.0],
+                [0.0, 0.0, 1.0],
+            ];
+            let specs: Vec<&'static spec::MarkerSpec> = match args.get(3).map(|s| s.as_str()) {
+                Some(name) if name != "auto" => {
+                    vec![spec::by_name(name).unwrap_or_else(|| {
+                        eprintln!("unknown variant {name} (use T, M, D or auto)");
+                        exit(2);
+                    })]
+                }
+                _ => spec::variants().to_vec(),
+            };
+            let dets = detector::detect(&src, &k, &specs, 0.25, None);
+            for d in &dets {
+                println!("{}", det_to_json(d));
+            }
+            if dets.is_empty() {
+                eprintln!("no simittag decoded");
+                exit(1);
+            }
+        }
         Some("serve") => serve(),
         _ => {
             eprintln!("{}", usage);
