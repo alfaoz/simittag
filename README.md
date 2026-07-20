@@ -3,6 +3,8 @@
 
 Simittag
 ========
+[![ci](https://github.com/alfaoz/simittag/actions/workflows/ci.yml/badge.svg)](https://github.com/alfaoz/simittag/actions/workflows/ci.yml)
+
 Simittag is a circular visual fiducial system. Each tag carries a data payload and can be used to estimate the full 6-DoF pose of the camera. This repository contains the Python reference implementation and a Rust port of the detector. The Rust port has no dependencies and also builds to WebAssembly.
 
 Tags come in three variants. We recommend the M variant unless you have a specific reason to choose otherwise.
@@ -24,6 +26,7 @@ Table of Contents
   - [Pose Estimation](#pose-estimation)
   - [Lens Distortion](#lens-distortion)
 - [Performance](#performance)
+- [Detection Range](#detection-range)
 - [Comparison with Other Fiducial Systems](#comparison-with-other-fiducial-systems)
 - [Implementation Notes](#implementation-notes)
 - [License](#license)
@@ -112,7 +115,7 @@ gray = cv2.imread("frame.png", cv2.IMREAD_GRAYSCALE)
 results = detect.detect(gray, DEFAULT)
 
 for r in results:
-    print(r["mode"], r["value"], r["center"], r["tilt_deg_approx"])
+    print(r["variant"], r["mode"], r["value"], r["center"], r["tilt_deg"])
 ```
 
 Decoding works without camera calibration. For a metrically correct pose, pass your camera intrinsics as a 3×3 matrix with `K=`.
@@ -122,6 +125,8 @@ Decoding works without camera calibration. For a metrically correct pose, pass y
 ```
 ./rust/target/release/simittag detect frame.png
 ```
+
+This prints one JSON line per decoded tag, with the payload, the pose, and the recovered ellipse. Two optional arguments pin the variant and set the assumed horizontal field of view: `simittag detect frame.png M 78`. Decoding is robust to the FOV guess; only the pose needs the real value.
 
 You can also use the `simittag-core` crate as a library.
 
@@ -158,6 +163,8 @@ An ellipse admits two pose interpretations. This is the circular counterpart of 
 
 Median pose accuracy on realistically degraded synthetic frames, variant M, tilts from 0 to 70 degrees: 0.01 to 0.03 degrees of tilt error, 0.07 degrees of full rotation error, 0.04% depth error, and about 0.6 px of center reprojection error.
 
+Pose quality degrades before decoding does. Near the decode floor (tags 22 to 40 px across) the median tilt error grows to about 2 degrees, with a systematic underestimate of up to 3 degrees, because blur rounds the ellipse. If you decode at extreme range, trust the payload more than the tilt.
+
 ## Lens Distortion
 
 The pose math assumes a pinhole camera. Under radial distortion an off-center circle does not project to an ellipse, and the pose becomes biased. The effect is worst with wide lenses and tags near the edge of the frame. Pass your distortion coefficients to correct for it:
@@ -191,22 +198,29 @@ Measured with an A4-printed tag (175 mm outer diameter) on a 1080p, 60-degree-HF
 
 The decode floor is the smallest outer-ring diameter, in image pixels, that still decodes. Range scales linearly with print size and with camera resolution.
 
-When a small candidate fails to decode, the detector deconvolves the tag patch (Wiener filter against an assumed Gaussian point-spread) and retries. At long range the limit is not finding the tag — the outer ring is detected far past the decode floor — but inter-symbol interference: defocus bleeds neighboring data cells into each other. Undoing the blur recovers the bits. The retry runs only after a failed decode on a small candidate, so it adds nothing to healthy frames, and every retry result still has to pass the sync, Reed-Solomon, CRC, and decode-verify gates.
+When a small candidate fails to decode, the detector deconvolves the tag patch (Wiener filter against an assumed Gaussian point-spread) and retries. At long range the limit is not finding the tag, since the outer ring is detected far past the decode floor. The limit is inter-symbol interference: defocus bleeds neighboring data cells into each other. Undoing the blur recovers the bits. The retry runs only after a failed decode on a small candidate, so it adds nothing to healthy frames, and every retry result still has to pass the sync, Reed-Solomon, CRC, and decode-verify gates.
 
-Two accept gates guard the search. A sync-ring correlation gate filters non-tag grids before Reed-Solomon runs. After any successful decode, the observed grid is correlated against the re-encoded decoded pattern — a matched filter of the image against what was decoded — and the result is rejected below 0.65. On measured distributions, correct decodes score at least 0.81 and deliberately manufactured wrong-value collisions at most 0.52, so the gate closes the wrong-ID channel without costing a single correct decode.
+Two accept gates guard the search. A sync-ring correlation gate filters non-tag grids before Reed-Solomon runs. After any successful decode, the observed grid is correlated against the re-encoded decoded pattern (a matched filter of the image against what was decoded) and the result is rejected below 0.65. On measured distributions, correct decodes score at least 0.81 and deliberately manufactured wrong-value collisions at most 0.52, so the gate closes the wrong-ID channel without costing a single correct decode.
 
 Comparison with Other Fiducial Systems
 ======================================
-We did some head-to-head testing with identical print size, camera, and image degradation.
+We did some head-to-head testing against AprilTag (tag36h11, via `pupil-apriltags`) with identical print size, camera model, poses, and image degradation, at 15 degrees of tilt. Range is the farthest distance with at least 90% decode of an A4-printed tag:
 
-AprilTag's measured decode floor in the same rig is about 22 px — the same as variant T. Earlier builds of Simittag were out-ranged roughly 2x; the deconvolution retry closed the gap.
+| Camera width | Simittag T | Simittag M | Simittag D | AprilTag 36h11 |
+|---|---:|---:|---:|---:|
+| 1280 px | 8.5 m | 6.5 m | 5.0 m | 9.0 m |
+| 1920 px | 13.0 m | 10.0 m | 8.0 m | 13.5 m |
 
 DataMatrix and QR codes store more bytes in the same area, because squares tile and rings do not. They provide no pose.
 
 Implementation Notes
 ====================
-It's advised that the Rust detector is used production. The Python package defines the correct behavior of the format and the detector, and exists for reference, experimentation, and regenerating the test fixtures.
+It's advised that the Rust detector is used in production. The Python package defines the correct behavior of the format and the detector, and exists for reference, experimentation, and regenerating the test fixtures.
+
+The two implementations are held together by the fixtures in `fixtures/`: golden vectors and rendered frames exported from the Python reference, which the Rust port must reproduce exactly, bit-for-bit for the codec and imaging stages and to identical decode decisions on every frame. `./check.sh` builds everything and runs the full contract (Rust unit tests, all six parity gates, and the Python self-tests); CI runs the same script on every push.
 
 License
 =======
-TBD.
+Simittag is licensed under the [BSD 2-Clause License](LICENSE). The Rust ellipse-fitting routine is derived from OpenCV; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+The tag format is free for anyone to implement.
