@@ -110,11 +110,59 @@ def _decode_aligned(grid, spec, erasure_grid=None):
     return payload
 
 
-def decode(grid: np.ndarray, spec: MarkerSpec = DEFAULT, erasure_grid=None):
+def _byte_reliability(conf_grid, spec):
+    """Per-codeword-byte reliability = weakest cell confidence inside the byte."""
+    nbits = spec.data_ring_count * spec.SECTOR_COUNT
+    rel = np.full(nbits // 8, np.inf)
+    for k, ring, sector in _cell_order(spec):
+        c = float(conf_grid[ring, sector])
+        if c < rel[k // 8]:
+            rel[k // 8] = c
+    return rel
+
+
+def _decode_aligned_ranked(grid, spec, conf_grid, conf_erasure):
+    """
+    Decode a rotation-aligned grid using confidence-RANKED erasures.
+
+    The boolean-mask path erases every byte containing a cell under the
+    confidence threshold and, when that exceeds the NSYM-1 cap, keeps the
+    LOWEST-INDEXED bytes -- an arbitrary subset. Here the erased set is always
+    the WEAKEST bytes under the threshold, so the cap discards the most
+    reliable erasure candidates instead of whichever happened to sort last.
+    Attempt count is identical to the legacy path (one RS decode).
+    """
+    nbits = spec.data_ring_count * spec.SECTOR_COUNT
+    bits = [0] * nbits
+    for k, ring, sector in _cell_order(spec):
+        bits[k] = int(grid[ring, sector])
+    code = _bits_to_bytes(bits)
+
+    rel = _byte_reliability(conf_grid, spec)
+    order = np.argsort(rel, kind="stable")          # weakest byte first
+    cap = max(0, spec.RS_NSYM - 1)
+    erase_pos = sorted(int(i) for i in order[:cap] if rel[i] < conf_erasure)
+
+    try:
+        data, _ = gf256.rs_decode(code, spec.RS_NSYM,
+                                  erase_pos=erase_pos or None)
+    except Exception:
+        return None
+    payload, crc = data[:spec.payload_bytes], data[spec.payload_bytes]
+    if gf256.crc8(payload) != crc:
+        return None
+    return payload
+
+
+def decode(grid: np.ndarray, spec: MarkerSpec = DEFAULT, erasure_grid=None,
+           conf_grid=None, conf_erasure=0.25):
     """
     Decode a cell grid -> payload bytes, or None if it fails CRC/RS.
     erasure_grid: optional bool array (RING_COUNT, SECTOR_COUNT); True = unreliable
     cell. A codeword byte is marked an RS erasure if any of its cells is unreliable.
+    conf_grid: optional float array (RING_COUNT, SECTOR_COUNT) of per-cell
+    confidences; when given, ranked-erasure decoding is used instead of
+    erasure_grid (see _decode_aligned_ranked).
 
     Rotation: HAS_SYNC variants lock rotation in one shot via the sync ring; no-sync
     variants (T) brute-force all SECTOR_COUNT shifts, RS+CRC arbitrating.
@@ -122,15 +170,20 @@ def decode(grid: np.ndarray, spec: MarkerSpec = DEFAULT, erasure_grid=None):
     """
     grid = np.asarray(grid)
     eg = np.asarray(erasure_grid) if erasure_grid is not None else None
+    cg = np.asarray(conf_grid) if conf_grid is not None else None
     if spec.HAS_SYNC:
-        shift, _ = find_rotation(grid[0], spec)
-        shifts = [shift]
+        shift0, _ = find_rotation(grid[0], spec)
+        shifts = [shift0]
     else:
         shifts = range(spec.SECTOR_COUNT)
     for shift in shifts:
         aligned = np.roll(grid, -shift, axis=1)
-        eg_s = np.roll(eg, -shift, axis=1) if eg is not None else None
-        pb = _decode_aligned(aligned, spec, eg_s)
+        if cg is not None:
+            pb = _decode_aligned_ranked(aligned, spec,
+                                        np.roll(cg, -shift, axis=1), conf_erasure)
+        else:
+            eg_s = np.roll(eg, -shift, axis=1) if eg is not None else None
+            pb = _decode_aligned(aligned, spec, eg_s)
         if pb is not None:
             return pb, shift
     return None, (shifts[0] if spec.HAS_SYNC else 0)

@@ -20,6 +20,66 @@ import cv2
 from .spec import resolve_specs
 from . import codec, payload, pose
 
+# Sync-ring gate: a decode attempt must correlate at least this fraction of
+# SECTOR_COUNT against the variant's sync pattern before RS is tried. Pre-filter
+# only -- RS + CRC remain the actual accept gate.
+SYNC_MIN = 0.70
+# Wiener-deconvolution retry for small candidates: at the range floor cells are
+# ~2px and defocus/JPEG smear bleeds neighboring cells into each other
+# (inter-symbol interference); deconvolving the patch before sampling recovers
+# otherwise-lost decodes. Only runs when the normal attempts all failed and the
+# ellipse is small, so it costs nothing on healthy frames. Decode-verified
+# (sync + RS + CRC), so it adds decode power, not false accepts. Measured
+# floors (A4 tag, 1080p, blur 1.0 noise 3 jpeg 85): T 9->12m, M 6->8.5m,
+# D 5->7m; decode floors T~24px M~34px D~42px outer diameter.
+DECONV_SMALL = True
+DECONV_MAX_PX = 80        # only retry candidates smaller than this (major axis)
+DECONV_SIGMAS = (1.0, 1.6)  # assumed PSF sigmas (image px) to try
+# NOTE: no upsampling before the FFT -- measured STRICTLY BETTER than cubic
+# 2x/3x upsample variants (up=3 cost D@7.5m 29->19/30; cubic overshoot is
+# amplified by the Wiener filter), and native-res sampling keeps the Rust port
+# free of interpolation parity concerns.
+# Decode-verify gate: minimum full-grid grayscale correlation (from
+# _refine_phase) between the image and the DECODED codeword's re-encoded
+# pattern -- a matched filter of the image against what was decoded. Rejects
+# wrong-value RS+CRC collisions that no sync gate can catch (the sync ring is
+# genuinely present on a true tag at the range floor). Calibrated on measured
+# distributions (sim/exp_verify*.py): right-value corr min 0.807 over 341
+# accepts; manufactured wrong-value accepts max 0.517 over 75 -- 0.65 sits in
+# the middle of an empty 0.29-wide gap.
+VERIFY_MIN = 0.65
+_VERIFY_LOG = None        # experiment hook: (corr, variant, decoded) tuples
+
+
+def _deconv_patch(gray, geom, sigma, lam=0.01):
+    """
+    Crop the candidate (1.5x its ellipse) and Wiener-deconvolve a Gaussian PSF
+    of the given sigma (image px). Returns (patch, T) with T the image->patch
+    homography (a pure translation), or (None, None) when the crop degenerates.
+    """
+    (cx, cy), (MA, ma), _ = geom
+    r = 0.75 * max(MA, ma)
+    x0, y0 = int(max(0, cx - r)), int(max(0, cy - r))
+    x1 = int(min(gray.shape[1], cx + r)); y1 = int(min(gray.shape[0], cy + r))
+    if x1 - x0 < 12 or y1 - y0 < 12:
+        return None, None
+    patch = gray[y0:y1, x0:x1].astype(np.float64)
+    # Pad edge-replicate to the next power of two: a plain radix-2 FFT then
+    # suffices (the Rust port carries no FFT dependency), and replication keeps
+    # the border smooth so the pad adds no ringing of its own.
+    ph, pw = patch.shape
+    fh = 1 << (ph - 1).bit_length()
+    fw = 1 << (pw - 1).bit_length()
+    padded = np.pad(patch, ((0, fh - ph), (0, fw - pw)), mode="edge")
+    F = np.fft.rfft2(padded)
+    fy = np.fft.fftfreq(fh)[:, None]
+    fx = np.fft.rfftfreq(fw)[None, :]
+    G = np.exp(-2.0 * np.pi ** 2 * sigma * sigma * (fx * fx + fy * fy))
+    out = np.fft.irfft2(F * G / (G * G + lam), s=padded.shape)[:ph, :pw]
+    out = np.clip(out, 0, 255).astype(np.uint8)
+    T = np.array([[1.0, 0, -x0], [0, 1.0, -y0], [0, 0, 1.0]])
+    return out, T
+
 
 def default_K(width, height, fov_deg=60.0):
     f = (width / 2) / np.tan(np.radians(fov_deg) / 2)
@@ -412,20 +472,21 @@ def _refine_phase(gray, Hbase, spec, theta0, ref_grid):
     ths1 = theta0 + np.linspace(-0.5 * step, 0.5 * step, 13)
     cs1 = corr(ths1)
     if cs1 is None:
-        return theta0
+        return theta0, -1.0
     t_pk = ths1[int(np.argmax(cs1))]
     ths2 = t_pk + np.linspace(-step / 10, step / 10, 13)
     cs2 = corr(ths2)
     if cs2 is None:
-        return t_pk
+        return t_pk, float(np.max(cs1))
+    vc = float(np.max(cs2))
     xs_f = ths2 - t_pk
     A = np.stack([xs_f * xs_f, xs_f, np.ones_like(xs_f)], axis=1)
     (a2, a1, _), *_ = np.linalg.lstsq(A, cs2, rcond=None)
     if a2 < -1e-9:
         v = float(t_pk - a1 / (2 * a2))
         if ths2[0] <= v <= ths2[-1]:
-            return v
-    return float(ths2[int(np.argmax(cs2))])
+            return v, vc
+    return float(ths2[int(np.argmax(cs2))]), vc
 
 
 def _try_decode_spec(gray, Hs, spec, conf_erasure):
@@ -438,7 +499,6 @@ def _try_decode_spec(gray, Hs, spec, conf_erasure):
     tiny grid (brute-force rotation lives in codec.decode).
     """
     step = 2 * np.pi / spec.SECTOR_COUNT
-    SYNC_MIN = 0.70  # fraction of SECTOR_COUNT
     for H in Hs:
         for scale in (1.0, 1.06, 1.12, 0.94):
             Hs_ = H @ np.diag([scale, scale, 1.0])
@@ -450,7 +510,8 @@ def _try_decode_spec(gray, Hs, spec, conf_erasure):
                     _, scores = codec.find_rotation(grid[0], spec)
                     if max(scores) < SYNC_MIN * spec.SECTOR_COUNT:
                         continue
-                pb, sh = codec.decode(grid, spec, erasure_grid=conf < conf_erasure)
+                pb, sh = codec.decode(grid, spec, conf_grid=conf,
+                                      conf_erasure=conf_erasure)
                 if pb is not None:
                     # Fold the decoded in-plane rotation (phase phi0 + sector shift)
                     # into the pose so the recovered X axis points at sector 0 (else
@@ -458,15 +519,26 @@ def _try_decode_spec(gray, Hs, spec, conf_erasure):
                     # to a continuous, unbiased angle by correlating the full known
                     # grid (see _refine_phase; the coarse bin can be ~5deg off).
                     theta = phi0 + sh * step
-                    refined = _refine_phase(gray, Hs_, spec, theta,
-                                            codec.encode(pb, spec))
-                    d = (refined - theta + np.pi) % (2 * np.pi) - np.pi  # no wrap
-                    theta = theta + d
-                    chosen_H = _rotate_H(Hs_, theta)
+                    refined, vcorr = _refine_phase(gray, Hs_, spec, theta,
+                                                   codec.encode(pb, spec))
                     try:
                         decoded = payload.decode(pb, spec)
                     except Exception:
                         decoded = ("?", pb)
+                    if _VERIFY_LOG is not None:
+                        _VERIFY_LOG.append((vcorr, spec.NAME, decoded))
+                    # Decode-verify gate: the refine correlation IS a matched
+                    # filter of the image against the decoded codeword's full
+                    # grid. A wrong-value accept (RS+CRC collision on marginal
+                    # bits) disagrees with the image in ~half its cells and
+                    # collapses this correlation, so thresholding it rejects
+                    # wrong IDs that no sync gate can catch (the sync ring is
+                    # genuinely present on a true tag at the range floor).
+                    if vcorr < VERIFY_MIN:
+                        continue
+                    d = (refined - theta + np.pi) % (2 * np.pi) - np.pi  # no wrap
+                    theta = theta + d
+                    chosen_H = _rotate_H(Hs_, theta)
                     return (spec.NAME, decoded), chosen_H
     return None, None
 
@@ -557,6 +629,21 @@ def detect_markers(gray, spec=None, K=None, conf_erasure=0.25, versions=None,
                     geom1 = alt1                # report the TAG's geometry
                     (cx, cy), (MA, ma), ang = geom1
                     break
+        # ISI retry: small candidate, all attempts failed -> deconvolve the patch
+        # and search again (see DECONV_SMALL above).
+        if decoded is None and DECONV_SMALL and max(MA, ma) < DECONV_MAX_PX:
+            for sg in DECONV_SIGMAS:
+                patch, T = _deconv_patch(gray, geom1, sg)
+                if patch is None:
+                    break
+                Hp = [T @ Hh for Hh in Hs]
+                for sp in specs:
+                    decoded, H = _try_decode_spec(patch, Hp, sp, conf_erasure)
+                    if decoded is not None:
+                        chosen_H = np.linalg.inv(T) @ H
+                        break
+                if decoded is not None:
+                    break
         # Relaxed gates let lone round contours through; show a POSE-ONLY box only when
         # there's a concentric child (real nested-ring marker). A decoded marker is
         # always kept. This keeps the range win without spraying boxes on stray circles.
@@ -623,6 +710,20 @@ def detect(gray, spec=None, K=None, conf_erasure=0.25, versions=None, dist=None)
                                               sp, conf_erasure)
                 if decoded is not None:
                     hit = (decoded, H, alt1)
+                    break
+        # ISI retry: deconvolve small failed candidates (see detect_markers)
+        if hit is None and DECONV_SMALL and max(MA, ma) < DECONV_MAX_PX:
+            for sg in DECONV_SIGMAS:
+                patch, T = _deconv_patch(gray, geom1, sg)
+                if patch is None:
+                    break
+                Hp = [T @ Hh for Hh in Hs]
+                for sp in specs:
+                    decoded, H = _try_decode_spec(patch, Hp, sp, conf_erasure)
+                    if decoded is not None:
+                        hit = (decoded, np.linalg.inv(T) @ H, geom1)
+                        break
+                if hit is not None:
                     break
         if hit is None:
             continue
