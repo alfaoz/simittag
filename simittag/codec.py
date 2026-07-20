@@ -212,3 +212,4 @@ if __name__ == "__main__":
                 g[ring, sec] ^= 1
             ok_err += (decode(g, sp)[0] == payload)
         print(f"  {name}: clean {ok}/{N}  +rot {ok_rot}/{N}  +flips {ok_err}/{N}")
+        assert ok == N and ok_rot == N and ok_err == N, f"codec self-test FAILED for {name}"

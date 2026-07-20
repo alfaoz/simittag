@@ -244,3 +244,4 @@ if __name__ == "__main__":
     print(f"  errors  (<= {nsym // 2}): {ok_err}/{trials} recovered")
     print(f"  erasures(<= {nsym}): {ok_era}/{trials} recovered")
     print(f"  crc8('simit') = {crc8(b'simit'):#04x}")
+    assert ok_err == trials and ok_era == trials, "gf256 self-test FAILED"
