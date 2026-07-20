@@ -4,7 +4,7 @@
 //! eigenvalues ASCENDING with matching eigenvector columns (numpy.linalg.eigh
 //! convention). Jacobi converges to ~1e-14 relative here, comfortably inside
 //! the 1e-9 fixture gate; eigenvector SIGNS are pinned by the caller
-//! (transforms_from_conic), not here, mirroring the Python canonicalization.
+//! (circle_poses_from_conic), not here, mirroring the Python canonicalization.
 
 pub type M3 = [[f64; 3]; 3];
 pub type V3 = [f64; 3];

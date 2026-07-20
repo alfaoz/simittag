@@ -1,9 +1,11 @@
-//! Conic -> perspective transform. Port of simittag/pose.py (itself a port of
-//! Cantag's TransformEllipseFull). Gated at 1e-9 against fixtures/geometry.json.
+//! Pose of a circle from its perspective projection. Mirror of
+//! simittag/pose.py, gated at 1e-9 against fixtures/geometry.json; see that
+//! module's docstring for the derivation and the published references
+//! (Shiu & Ahmad 1989; Kanatani & Liu 1993; Rice et al., PerCom 2006).
 //!
 //! The eigenvector sign canonicalization matches pose.py exactly (col 2: normal
-//! toward camera; col 1: largest-|component| positive; col 0: det=+1) -- that
-//! rule exists precisely so this port and LAPACK land on the SAME homography.
+//! toward camera; col 1: largest-|component| positive; col 0: det=+1). That
+//! rule exists precisely so this mirror and LAPACK land on the SAME homography.
 
 use crate::mat::{self, M3, V3};
 
@@ -43,10 +45,10 @@ pub fn ellipse_to_conic(g: &EllipseGeom) -> M3 {
     ]
 }
 
-/// Conic (normalized camera coords) -> two 3x4-equivalent transforms, returned
-/// as the two homography column triples (cols 0,1,3 of the 4x4), matching
-/// Python's H_norm = T[:3][:, [0,1,3]].
-fn transforms_from_conic(c: &M3) -> [M3; 2] {
+/// Conic (normalized camera coords) -> the two homographies mapping the unit
+/// circle's plane into rays. Columns: plane x basis, plane y basis, circle
+/// center. Mirrors circle_poses_from_conic in pose.py.
+fn circle_poses_from_conic(c: &M3) -> [M3; 2] {
     let (mut w, mut v) = mat::eigh3(c);
     if w.iter().filter(|&&x| x < 0.0).count() > 1 {
         for x in &mut w {
@@ -87,30 +89,27 @@ fn transforms_from_conic(c: &M3) -> [M3; 2] {
     }
     let (l1, l2, l3) = (ws[0], ws[1], ws[2]);
 
-    let denom = l3 - l1;
-    let pmcos = ((l3 - l2) / denom).max(0.0).sqrt();
-    let pmsin = ((l2 - l1) / denom).max(0.0).sqrt();
-    let tx = ((l2 - l1) * (l3 - l2)).max(0.0).sqrt() / l2;
-    let scale = (-l1 * l3 / (l2 * l2)).max(0.0).sqrt(); // bullseye_size = 1
+    let span = l3 - l1;
+    let ct = ((l3 - l2) / span).max(0.0).sqrt(); // cos(tilt) in the eigenbasis
+    let st = ((l2 - l1) / span).max(0.0).sqrt(); // sin(tilt)
+    let u = ((l2 - l1) * (l3 - l2)).max(0.0).sqrt() / l2; // center in-plane offset
+    let rho = (-l1 * l3 / (l2 * l2)).max(0.0).sqrt(); // inverse center distance
+
+    let col = |m: &M3, j: usize| -> V3 { [m[0][j], m[1][j], m[2][j]] };
+    let (v1, v2, v3) = (col(&v, 0), col(&v, 1), col(&v, 2));
 
     let mut out = [[[0.0f64; 3]; 3]; 2];
-    for (oi, sgn) in [(0usize, 1.0f64), (1, -1.0)] {
-        // R1 @ r2 @ trans, keeping only columns 0, 1, 3 of the 4x4 product.
-        // r2 rotates about y: [[pmcos,0,-sgn*pmsin],[0,1,0],[sgn*pmsin,0,pmcos]]
-        // trans: x += sgn*tx/scale, z += 1/scale.
-        let r2 = [
-            [pmcos, 0.0, -sgn * pmsin],
-            [0.0, 1.0, 0.0],
-            [sgn * pmsin, 0.0, pmcos],
-        ];
-        let r12 = mat::matmul(&v, &r2);
-        let tcol = [sgn * tx / scale, 0.0, 1.0 / scale];
-        let tcam = mat::matvec(&r12, &tcol);
-        out[oi] = [
-            [r12[0][0], r12[0][1], tcam[0]],
-            [r12[1][0], r12[1][1], tcam[1]],
-            [r12[2][0], r12[2][1], tcam[2]],
-        ];
+    for (oi, s) in [(0usize, 1.0f64), (1, -1.0)] {
+        let mut b1 = [0.0f64; 3]; // plane x basis
+        let mut axis = [0.0f64; 3]; // tilted axis through the center
+        for r in 0..3 {
+            b1[r] = ct * v1[r] + s * st * v3[r];
+            axis[r] = -s * st * v1[r] + ct * v3[r];
+        }
+        for r in 0..3 {
+            let center = (s * u * b1[r] + axis[r]) / rho;
+            out[oi][r] = [b1[r], v2[r], center];
+        }
     }
     out
 }
@@ -121,7 +120,7 @@ pub fn pose_homographies(geom: &EllipseGeom, k: &M3) -> Vec<M3> {
     let c_pix = ellipse_to_conic(geom);
     let c_norm = mat::matmul(&mat::matmul(&mat::transpose(k), &c_pix), k);
     let mut out = Vec::with_capacity(2);
-    for h_norm in transforms_from_conic(&c_norm) {
+    for h_norm in circle_poses_from_conic(&c_norm) {
         let mut h_pix = mat::matmul(k, &h_norm);
         if h_pix[2][2].abs() > 1e-12 {
             let s = 1.0 / h_pix[2][2];

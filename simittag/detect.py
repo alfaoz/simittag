@@ -2,9 +2,9 @@
 Detector v0.1 (Python prototype).
 
 Pipeline: adaptive threshold -> contour tree -> fit outer ellipse -> locate
-concentric bullseye -> CONIC perspective transform (pose.py, ported from Cantag's
-TransformEllipseFull) -> sample data rings through the homography -> soft grayscale
-cell sampling -> codec decode (sync rotation + RS/CRC).
+concentric bullseye -> conic pose (pose.py, the classical circular-feature
+method; references there) -> sample data rings through the homography -> soft
+grayscale cell sampling -> codec decode (sync rotation + RS/CRC).
 
 This replaces the earlier affine sampler, which could not handle tilt because
 concentric circles do not project to concentric ellipses. The conic transform
@@ -151,8 +151,9 @@ def _sample_many(img, xs, ys):
 
 def _find_marker_ellipses(gray):
     """
-    Find outer-ring ellipse candidates using the contour NESTING TREE (Cantag's
-    approach), NOT ellipse-center distance. Under perspective, concentric circles
+    Find outer-ring ellipse candidates using the contour NESTING TREE (the
+    approach of Rice et al.'s Cantag), NOT ellipse-center distance. Under
+    perspective, concentric circles
     project to NON-concentric ellipses (centers separate by tens of px at tilt), so
     a center-distance concentricity test wrongly rejects the true outer ring. The
     nesting tree encodes containment topologically, which is perspective-invariant.
