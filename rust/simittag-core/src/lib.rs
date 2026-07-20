@@ -6,6 +6,7 @@
 pub mod codec;
 pub mod contours;
 pub mod detector;
+pub mod fft;
 pub mod fitellipse;
 pub mod frontend;
 pub mod gf256;

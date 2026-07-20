@@ -205,6 +205,8 @@ fn build_grid(
 // _refine_phase
 // ---------------------------------------------------------------------------
 
+/// Returns (refined theta, verify corr): the peak full-grid correlation is
+/// also the decode-verify score (see VERIFY_MIN in the Python reference).
 fn refine_phase(
     gray: &Gray,
     hbase: &M3,
@@ -212,7 +214,7 @@ fn refine_phase(
     theta0: f64,
     ref_grid: &[u8],
     pat: &SamplePattern,
-) -> f64 {
+) -> (f64, f64) {
     let step = 2.0 * std::f64::consts::PI / spec.sector_count as f64;
     let ncells = spec.ring_count * spec.sector_count;
     let refv: Vec<f64> = ref_grid.iter().map(|&b| if b > 0 { -1.0 } else { 1.0 }).collect();
@@ -261,7 +263,7 @@ fn refine_phase(
     let ths1: Vec<f64> = lin(theta0 - 0.5 * step, theta0 + 0.5 * step, 13);
     let cs1 = match corr(&ths1) {
         Some(v) => v,
-        None => return theta0,
+        None => return (theta0, -1.0),
     };
     let mut pk = 0usize;
     for (i, &v) in cs1.iter().enumerate() {
@@ -273,8 +275,9 @@ fn refine_phase(
     let ths2: Vec<f64> = lin(t_pk - step / 10.0, t_pk + step / 10.0, 13);
     let cs2 = match corr(&ths2) {
         Some(v) => v,
-        None => return t_pk,
+        None => return (t_pk, cs1.iter().cloned().fold(f64::MIN, f64::max)),
     };
+    let vc = cs2.iter().cloned().fold(f64::MIN, f64::max);
     // least-squares quadratic over the whole fine window
     let mut a = Vec::with_capacity(13 * 3);
     for &th in &ths2 {
@@ -286,7 +289,7 @@ fn refine_phase(
     if a2 < -1e-9 {
         let v = t_pk - a1 / (2.0 * a2);
         if ths2[0] <= v && v <= ths2[12] {
-            return v;
+            return (v, vc);
         }
     }
     let mut pk2 = 0usize;
@@ -295,7 +298,7 @@ fn refine_phase(
             pk2 = i;
         }
     }
-    ths2[pk2]
+    (ths2[pk2], vc)
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +405,86 @@ pub struct DecodeHit {
     pub chosen_h: M3,
 }
 
+// Decode-verify gate + deconvolution retry: constants mirror the Python
+// reference (detect.py), where their calibration data lives.
+const VERIFY_MIN: f64 = 0.65;
+const DECONV_MAX_PX: f64 = 80.0;
+const DECONV_SIGMAS: [f64; 2] = [1.0, 1.6];
+const DECONV_LAMBDA: f64 = 0.01;
+
+/// Crop the candidate (1.5x its ellipse), pad edge-replicate to pow2, and
+/// Wiener-deconvolve a Gaussian PSF. Returns (patch, T) with T the
+/// image->patch translation homography, or None when the crop degenerates.
+fn deconv_patch(gray: &Gray, geom: &EllipseGeom, sigma: f64) -> Option<(Gray, M3)> {
+    let r = 0.75 * geom.major.max(geom.minor);
+    let x0 = (geom.cx - r).max(0.0) as i64;
+    let y0 = (geom.cy - r).max(0.0) as i64;
+    let x1 = (geom.cx + r).min(gray.w as f64) as i64;
+    let y1 = (geom.cy + r).min(gray.h as f64) as i64;
+    if x1 - x0 < 12 || y1 - y0 < 12 {
+        return None;
+    }
+    let (x0, y0) = (x0 as usize, y0 as usize);
+    let (pw, ph) = (x1 as usize - x0, y1 as usize - y0);
+    let fw = pw.next_power_of_two();
+    let fh = ph.next_power_of_two();
+    // edge-replicate pad (np.pad mode="edge", bottom/right only)
+    let mut padded = vec![0f64; fh * fw];
+    for y in 0..fh {
+        let sy = y.min(ph - 1);
+        for x in 0..fw {
+            let sx = x.min(pw - 1);
+            padded[y * fw + x] = gray.px[(y0 + sy) * gray.w + (x0 + sx)] as f64;
+        }
+    }
+    let fys = crate::fft::fftfreq(fh);
+    let fxs = crate::fft::fftfreq(fw);
+    let two_pi2_s2 = 2.0 * std::f64::consts::PI.powi(2) * sigma * sigma;
+    let filt: Vec<f64> = (0..fh * fw)
+        .map(|i| {
+            let g = (-two_pi2_s2 * (fys[i / fw].powi(2) + fxs[i % fw].powi(2))).exp();
+            g / (g * g + DECONV_LAMBDA)
+        })
+        .collect();
+    let out = crate::fft::filter2d_real(&padded, fh, fw, &filt);
+    let mut px = vec![0u8; ph * pw];
+    for y in 0..ph {
+        for x in 0..pw {
+            // np clip + astype(uint8): clamp then truncate toward zero
+            px[y * pw + x] = out[y * fw + x].clamp(0.0, 255.0) as u8;
+        }
+    }
+    let t = [[1.0, 0.0, -(x0 as f64)], [0.0, 1.0, -(y0 as f64)], [0.0, 0.0, 1.0]];
+    Some((Gray { w: pw, h: ph, px }, t))
+}
+
+/// The ISI retry: deconvolve a small failed candidate and rerun the decode
+/// search on the cleaned patch. `hs` are image-frame homographies; the hit's
+/// chosen_h is mapped back to image frame.
+fn deconv_retry(
+    gray: &Gray,
+    geom: &EllipseGeom,
+    hs: &[M3],
+    specs: &[&'static MarkerSpec],
+    conf_erasure: f32,
+) -> Option<DecodeHit> {
+    if geom.major.max(geom.minor) >= DECONV_MAX_PX {
+        return None;
+    }
+    for &sg in &DECONV_SIGMAS {
+        let (patch, t) = deconv_patch(gray, geom, sg)?;
+        let hp: Vec<M3> = hs.iter().map(|h| mat::matmul(&t, h)).collect();
+        let tinv = mat::inv3(&t);
+        for sp in specs {
+            if let Some(mut hit) = try_decode_spec(&patch, &hp, sp, conf_erasure) {
+                hit.chosen_h = mat::matmul(&tinv, &hit.chosen_h);
+                return Some(hit);
+            }
+        }
+    }
+    None
+}
+
 fn try_decode_spec(
     gray: &Gray,
     hs: &[M3],
@@ -426,12 +509,19 @@ fn try_decode_spec(
                         continue;
                     }
                 }
-                let erasure: Vec<bool> = conf.iter().map(|&cv| cv < conf_erasure).collect();
-                let (pb, sh) = codec::decode(&grid, spec, Some(&erasure));
+                let (pb, sh) = codec::decode_conf(&grid, spec, &conf, conf_erasure);
                 if let Some(pb) = pb {
                     let theta0 = phi0 + sh as f64 * step;
                     let ref_grid = codec::encode(&pb, spec).unwrap();
-                    let refined = refine_phase(gray, &hs_, spec, theta0, &ref_grid, rpat);
+                    let (refined, vcorr) =
+                        refine_phase(gray, &hs_, spec, theta0, &ref_grid, rpat);
+                    // Decode-verify gate: matched filter of the image against
+                    // the decoded codeword's full grid; rejects wrong-value
+                    // RS+CRC collisions (see the Python reference for the
+                    // measured calibration behind 0.65).
+                    if vcorr < VERIFY_MIN {
+                        continue;
+                    }
                     let d = (refined - theta0 + std::f64::consts::PI)
                         .rem_euclid(2.0 * std::f64::consts::PI)
                         - std::f64::consts::PI;
@@ -532,6 +622,11 @@ pub fn detect_markers(
                 }
             }
         }
+        // ISI retry: small candidate, all attempts failed -> deconvolve the
+        // patch and search again (see deconv_retry above).
+        if hit.is_none() {
+            hit = deconv_retry(&gray, &geom1, &hs, specs, conf_erasure);
+        }
         if hit.is_none() && (cand.inner.is_none() || !pose_only) {
             return None;
         }
@@ -622,6 +717,11 @@ pub fn detect(
                     }
                 }
             }
+        }
+        // ISI retry: deconvolve small failed candidates (see detect_markers)
+        if found.is_none() {
+            found = deconv_retry(&gray, &geom1, &hs, specs, conf_erasure)
+                .map(|hit| (hit, geom1));
         }
         found.map(|(hit, g)| {
             let (r, t) = pose::decompose_h(&hit.chosen_h, k);

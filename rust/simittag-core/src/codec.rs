@@ -121,6 +121,89 @@ fn decode_aligned(
     Some(payload.to_vec())
 }
 
+/// Per-codeword-byte reliability = weakest cell confidence inside the byte.
+fn byte_reliability(conf: &[f32], spec: &MarkerSpec) -> Vec<f64> {
+    let nbits = spec.data_ring_count() * spec.sector_count;
+    let mut rel = vec![f64::INFINITY; nbits / 8];
+    for (k, ring, sector) in cell_order(spec) {
+        let c = conf[ring * spec.sector_count + sector] as f64;
+        if c < rel[k / 8] {
+            rel[k / 8] = c;
+        }
+    }
+    rel
+}
+
+/// Decode a rotation-aligned grid with confidence-RANKED erasures: the
+/// NSYM-1 cap keeps the WEAKEST under-threshold bytes, not the
+/// lowest-indexed ones. One RS attempt, like the boolean path.
+fn decode_aligned_ranked(
+    grid: &[u8],
+    spec: &MarkerSpec,
+    conf: &[f32],
+    conf_erasure: f32,
+) -> Option<Vec<u8>> {
+    let nbits = spec.data_ring_count() * spec.sector_count;
+    let mut bits = vec![0u8; nbits];
+    for (k, ring, sector) in cell_order(spec) {
+        bits[k] = grid[ring * spec.sector_count + sector];
+    }
+    let code = bits_to_bytes(&bits);
+
+    let rel = byte_reliability(conf, spec);
+    let mut order: Vec<usize> = (0..rel.len()).collect();
+    order.sort_by(|&a, &b| rel[a].partial_cmp(&rel[b]).unwrap()); // stable
+    let cap = spec.rs_nsym.saturating_sub(1);
+    let mut erase_pos: Vec<usize> = order
+        .iter()
+        .take(cap)
+        .copied()
+        .filter(|&i| rel[i] < conf_erasure as f64)
+        .collect();
+    erase_pos.sort_unstable();
+
+    let (data, _) = gf256::rs_decode(&code, spec.rs_nsym, &erase_pos).ok()?;
+    let (payload, crc) = (&data[..spec.payload_bytes()], data[spec.payload_bytes()]);
+    if gf256::crc8(payload) != crc {
+        return None;
+    }
+    Some(payload.to_vec())
+}
+
+fn roll_conf(conf: &[f32], spec: &MarkerSpec, shift: usize) -> Vec<f32> {
+    let n = spec.sector_count;
+    let mut out = vec![0f32; conf.len()];
+    for r in 0..spec.ring_count {
+        for i in 0..n {
+            out[r * n + i] = conf[r * n + (i + shift) % n];
+        }
+    }
+    out
+}
+
+/// Ranked-erasure variant of `decode` (mirrors Python's conf_grid path).
+pub fn decode_conf(
+    grid: &[u8],
+    spec: &MarkerSpec,
+    conf: &[f32],
+    conf_erasure: f32,
+) -> (Option<Vec<u8>>, usize) {
+    let shifts: Vec<usize> = if spec.has_sync {
+        let (shift, _) = find_rotation(&grid[..spec.sector_count], spec);
+        vec![shift]
+    } else {
+        (0..spec.sector_count).collect()
+    };
+    for &shift in &shifts {
+        let aligned = roll_grid(grid, spec, shift);
+        let conf_s = roll_conf(conf, spec, shift);
+        if let Some(pb) = decode_aligned_ranked(&aligned, spec, &conf_s, conf_erasure) {
+            return (Some(pb), shift);
+        }
+    }
+    (None, if spec.has_sync { shifts[0] } else { 0 })
+}
+
 fn roll_grid(grid: &[u8], spec: &MarkerSpec, shift: usize) -> Vec<u8> {
     // np.roll(grid, -shift, axis=1): out[r][i] = grid[r][(i + shift) % n]
     let n = spec.sector_count;

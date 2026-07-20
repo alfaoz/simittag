@@ -209,6 +209,45 @@ fn parity_codec(path: &str) -> bool {
     }
     ok &= g.report();
 
+    // ranked-confidence decode path (codec.decode conf_grid= in Python)
+    if !fx["grids_conf"].is_null() {
+        let mut g = Gate::new("grid_conf");
+        for sp in spec::variants() {
+            for case in fx["grids_conf"][sp.name].as_array().unwrap() {
+                let pb = hex_to_bytes(case["payload"].as_str().unwrap());
+                let grid = codec::encode(&pb, sp).unwrap();
+                for sub in case["cases"].as_array().unwrap() {
+                    let shift = sub["shift"].as_u64().unwrap() as usize;
+                    let n = sp.sector_count;
+                    let mut gmut = vec![0u8; grid.len()];
+                    for r in 0..sp.ring_count {
+                        for i in 0..n {
+                            gmut[r * n + (i + shift) % n] = grid[r * n + i];
+                        }
+                    }
+                    for f in sub["flips"].as_array().unwrap() {
+                        let (r, s) =
+                            (f[0].as_u64().unwrap() as usize, f[1].as_u64().unwrap() as usize);
+                        gmut[r * n + s] ^= 1;
+                    }
+                    let conf: Vec<f32> = sub["conf"].as_array().unwrap().iter()
+                        .flat_map(|row| row.as_array().unwrap().iter())
+                        .map(|v| v.as_f64().unwrap() as f32)
+                        .collect();
+                    let (got, gsh) = codec::decode_conf(&gmut, sp, &conf, 0.25);
+                    let want = &sub["out"];
+                    let matches = match (&got, want) {
+                        (None, J::Null) => true,
+                        (Some(d), J::String(s)) => bytes_to_hex(d) == *s,
+                        _ => false,
+                    } && gsh as i64 == sub["out_shift"].as_i64().unwrap();
+                    g.check(matches, || format!("{} conf case {}", sp.name, sub));
+                }
+            }
+        }
+        ok &= g.report();
+    }
+
     let mut g = Gate::new("mode_encode");
     for c in fx["mode_encode"].as_array().unwrap() {
         let sp = spec::by_name(c["variant"].as_str().unwrap()).unwrap();
