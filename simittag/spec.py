@@ -75,8 +75,14 @@ class MarkerSpec:
     SYNC: tuple = (1, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0,
                    1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0)
 
+    # which data ring carries the sync pattern (0 = innermost, the v1 layout).
+    # Cell arc length grows with ring radius, so an outermost sync ring keeps
+    # the gate readable deeper into the range floor (v2 experiment).
+    SYNC_RING: int = 0
+
     def __post_init__(self):
         assert self.R_BULLSEYE < self.R_DATA_IN < self.R_DATA_OUT < self.R_RING_IN < 1.0
+        assert 0 <= self.SYNC_RING < self.RING_COUNT
         if self.HAS_SYNC:
             assert len(self.SYNC) == self.SECTOR_COUNT, "SYNC length must equal SECTOR_COUNT"
         total_data_cells = self.data_ring_count * self.SECTOR_COUNT
@@ -93,6 +99,13 @@ class MarkerSpec:
     @property
     def first_data_ring(self) -> int:
         return 1 if self.HAS_SYNC else 0  # ring index where the codeword starts
+
+    @property
+    def data_rings(self) -> tuple:
+        """Ring indices carrying the codeword, in radial order (skips SYNC_RING)."""
+        if not self.HAS_SYNC:
+            return tuple(range(self.RING_COUNT))
+        return tuple(r for r in range(self.RING_COUNT) if r != self.SYNC_RING)
 
     def ring_radii(self):
         """Inner/center/outer normalized radius of each data ring (ring 0..RING_COUNT-1)."""

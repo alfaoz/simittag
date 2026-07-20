@@ -40,12 +40,12 @@ def _bytes_to_bits(data):
 
 def _cell_order(spec):
     """Yield (k, ring, sector) for the data cells in codeword-bit order.
-    Data rings start at spec.first_data_ring (1 if there is a sync ring, else 0)."""
-    dr = spec.data_ring_count
-    r0 = spec.first_data_ring
+    Data rings are every ring except the sync ring (spec.data_rings)."""
+    rings = spec.data_rings
+    dr = len(rings)
     for s in range(spec.SECTOR_COUNT):
         for rd in range(dr):
-            yield s * dr + rd, r0 + rd, s
+            yield s * dr + rd, rings[rd], s
 
 
 def encode(payload: bytes, spec: MarkerSpec = DEFAULT) -> np.ndarray:
@@ -57,7 +57,7 @@ def encode(payload: bytes, spec: MarkerSpec = DEFAULT) -> np.ndarray:
 
     grid = np.zeros((spec.RING_COUNT, spec.SECTOR_COUNT), dtype=np.int8)
     if spec.HAS_SYNC:
-        grid[0, :] = np.asarray(spec.SYNC, dtype=np.int8)
+        grid[spec.SYNC_RING, :] = np.asarray(spec.SYNC, dtype=np.int8)
     for k, ring, sector in _cell_order(spec):
         grid[ring, sector] = bits[k]
     return grid
@@ -172,7 +172,7 @@ def decode(grid: np.ndarray, spec: MarkerSpec = DEFAULT, erasure_grid=None,
     eg = np.asarray(erasure_grid) if erasure_grid is not None else None
     cg = np.asarray(conf_grid) if conf_grid is not None else None
     if spec.HAS_SYNC:
-        shift0, _ = find_rotation(grid[0], spec)
+        shift0, _ = find_rotation(grid[spec.SYNC_RING], spec)
         shifts = [shift0]
     else:
         shifts = range(spec.SECTOR_COUNT)

@@ -507,7 +507,7 @@ def _try_decode_spec(gray, Hs, spec, conf_erasure):
                 if grid is None:
                     continue
                 if spec.HAS_SYNC:
-                    _, scores = codec.find_rotation(grid[0], spec)
+                    _, scores = codec.find_rotation(grid[spec.SYNC_RING], spec)
                     if max(scores) < SYNC_MIN * spec.SECTOR_COUNT:
                         continue
                 pb, sh = codec.decode(grid, spec, conf_grid=conf,
