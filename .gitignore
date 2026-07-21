@@ -4,5 +4,7 @@ __pycache__/
 .claude/
 rust/target/
 rust/dist/
+dist/
 marker.png
 docs/make_readme_images.py
+v0.2_plan.md
