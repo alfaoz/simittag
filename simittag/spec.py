@@ -65,9 +65,9 @@ class MarkerSpec:
     CRC_BYTES: int = 1           # of the RS_K data bytes, this many are CRC8
 
     # payload-mode header: M/D spend 1 byte on a (version<<4)|mode header so one
-    # marker can be ID/GEO/TEXT/RAW. T is a pure tracking tag (ID only) with just 2
-    # payload bytes, so it skips the header and uses all bytes as a raw ID
-    # (65 536 IDs instead of 256). See payload.py.
+    # marker can be ID/GEO/RAW/TAGGED. T is a pure tracking tag (ID only) with one
+    # payload byte, so it skips the header and uses that byte as a raw ID
+    # (256 IDs). See payload.py.
     USE_HEADER: bool = True
 
     # sync sequence (length must == SECTOR_COUNT when HAS_SYNC). Chosen for low

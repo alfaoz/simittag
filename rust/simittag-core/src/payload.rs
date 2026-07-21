@@ -115,11 +115,21 @@ pub fn decode(payload: &[u8], spec: &MarkerSpec) -> Result<(&'static str, Value)
     if !spec.use_header {
         return Ok(("ID", Value::Int(be_to_int(payload))));
     }
+    let version = payload[0] >> 4;
     let mode = payload[0] & 0xF;
     let body = &payload[1..];
+    if version != VERSION {
+        return Err(format!(
+            "payload version {} is not supported (current {})",
+            version, VERSION
+        ));
+    }
     match mode {
         MODE_ID => Ok(("ID", Value::Int(be_to_int(body)))),
         MODE_GEO => {
+            if body.len() < 10 {
+                return Err(format!("GEO body is truncated: {} < 10 bytes", body.len()));
+            }
             let ulat = u32::from_be_bytes(body[0..4].try_into().unwrap());
             let ulon = u32::from_be_bytes(body[4..8].try_into().unwrap());
             let alt = i16::from_be_bytes(body[8..10].try_into().unwrap());
@@ -133,16 +143,27 @@ pub fn decode(payload: &[u8], spec: &MarkerSpec) -> Result<(&'static str, Value)
             ))
         }
         MODE_RAW => {
-            let n = (body[0] as usize).min(body.len() - 1); // Python slices clamp
-            Ok(("RAW", Value::Bytes(body[1..1 + n].to_vec())))
+            let Some((&length, data)) = body.split_first() else {
+                return Err("RAW body has no length byte".into());
+            };
+            let n = length as usize;
+            if n > data.len() {
+                return Err(format!("RAW length {} exceeds body capacity {}", n, data.len()));
+            }
+            Ok(("RAW", Value::Bytes(data[..n].to_vec())))
         }
-        MODE_TAGGED => Ok((
-            "TAGGED",
-            Value::Tagged {
-                namespace: body[0],
-                id: be_to_int(&body[1..]),
-            },
-        )),
+        MODE_TAGGED => {
+            if body.len() < 2 {
+                return Err("TAGGED body needs a namespace and ID".into());
+            }
+            Ok((
+                "TAGGED",
+                Value::Tagged {
+                    namespace: body[0],
+                    id: be_to_int(&body[1..]),
+                },
+            ))
+        }
         m => Err(format!("mode {} not implemented in v{}", m, VERSION)),
     }
 }
@@ -172,5 +193,8 @@ mod tests {
         assert!(encode_tagged(256, 0, &spec::D).is_err());
         assert!(encode_tagged(0, 1 << 16, &spec::M).is_err());
         assert!(encode_raw(&[0], &spec::T).is_err()); // T headerless
+        assert!(decode(&[0x01, 0, 0, 0], &spec::M).is_err()); // GEO needs D
+        assert!(decode(&[0x13, 0, 0, 0], &spec::M).is_err()); // future version
+        assert!(decode(&[0x03, 3, 0, 0], &spec::M).is_err()); // RAW length > capacity
     }
 }

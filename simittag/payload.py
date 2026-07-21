@@ -110,17 +110,27 @@ def decode(payload: bytes, spec: MarkerSpec = DEFAULT):
     h = payload[0]
     version, mode = h >> 4, h & 0xF
     body = payload[1:]
+    if version != VERSION:
+        raise ValueError(f"payload version {version} is not supported (current {VERSION})")
     if mode == MODE_ID:
         return "ID", int.from_bytes(body, "big")
     if mode == MODE_GEO:
+        if len(body) < 10:
+            raise ValueError(f"GEO body is truncated: {len(body)} < 10 bytes")
         lat = int.from_bytes(body[0:4], "big") / 1e7 - 90.0
         lon = int.from_bytes(body[4:8], "big") / 1e7 - 180.0
         alt = int.from_bytes(body[8:10], "big", signed=True)
         return "GEO", (lat, lon, alt)
     if mode == MODE_RAW:
+        if not body:
+            raise ValueError("RAW body has no length byte")
         n = body[0]
+        if n > len(body) - 1:
+            raise ValueError(f"RAW length {n} exceeds body capacity {len(body)-1}")
         return "RAW", bytes(body[1:1 + n])
     if mode == MODE_TAGGED:
+        if len(body) < 2:
+            raise ValueError("TAGGED body needs a namespace and ID")
         return "TAGGED", (body[0], int.from_bytes(body[1:], "big"))
     raise ValueError(f"mode {mode} not implemented in v{VERSION}")
 
