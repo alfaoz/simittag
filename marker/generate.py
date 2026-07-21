@@ -18,47 +18,67 @@ from simittag import codec, payload as _payload
 
 
 def render(payload: bytes, spec: MarkerSpec = DEFAULT, size: int = 1024,
-           supersample: int = 4, margin: float = 0.12) -> np.ndarray:
+           supersample: int = 4, margin: float = 0.12,
+           tile_rows: int = 64, inverted: bool = False) -> np.ndarray:
     """
     Return a (size, size) uint8 grayscale image (255=white, 0=black).
     margin: white quiet-zone fraction added around the marker (radius 1.0).
+    inverted: white marker foreground on a black background.
     """
+    if size <= 0:
+        raise ValueError("size must be positive")
+    if supersample <= 0:
+        raise ValueError("supersample must be positive")
+    if not (0.0 <= margin < 1.0):
+        raise ValueError("margin must be in [0, 1)")
+    if tile_rows <= 0:
+        raise ValueError("tile_rows must be positive")
+
     grid = codec.encode(payload, spec)
     S = size * supersample
     # radius 1.0 maps to (1 - margin) of the half-extent, leaving a quiet border
     cx = cy = (S - 1) / 2.0
     R_px = (S / 2.0) * (1.0 - margin)
 
-    ys, xs = np.mgrid[0:S, 0:S]
-    dx = (xs - cx) / R_px
-    dy = (ys - cy) / R_px
-    r = np.sqrt(dx * dx + dy * dy)
-    theta = np.mod(np.arctan2(dy, dx), 2 * np.pi)
-
-    img = np.ones((S, S), dtype=np.float32)  # white
+    # Work in horizontal tiles. The original full-frame implementation kept
+    # several SxS float64 arrays alive together and peaked around 1.4 GB RSS at
+    # the default 1024x / 4x supersampling. A binary supersample is only SxS
+    # bytes; temporary coordinate arrays are bounded by tile_rows x S.
+    img = np.full((S, S), 255, dtype=np.uint8)
+    dx = (np.arange(S, dtype=np.float64)[None, :] - cx) / R_px
     step = 2 * np.pi / spec.SECTOR_COUNT
     ring_w = (spec.R_DATA_OUT - spec.R_DATA_IN) / spec.RING_COUNT
 
-    # outer ring
-    img[(r >= spec.R_RING_IN) & (r <= 1.0)] = 0.0
-    # bullseye
-    img[r <= spec.R_BULLSEYE] = 0.0
-    # data cells
-    data_mask = (r >= spec.R_DATA_IN) & (r < spec.R_DATA_OUT)
-    ring_idx = np.clip(((r - spec.R_DATA_IN) / ring_w).astype(int), 0, spec.RING_COUNT - 1)
-    sec_idx = np.clip((theta / step).astype(int), 0, spec.SECTOR_COUNT - 1)
-    cell_val = grid[ring_idx, sec_idx]  # 1 => black
-    img[data_mask & (cell_val == 1)] = 0.0
-    # beyond 1.0 stays white (quiet zone)
+    for y0 in range(0, S, tile_rows):
+        y1 = min(S, y0 + tile_rows)
+        dy = (np.arange(y0, y1, dtype=np.float64)[:, None] - cy) / R_px
+        r = np.sqrt(dx * dx + dy * dy)
+        theta = np.mod(np.arctan2(dy, dx), 2 * np.pi)
+        tile = img[y0:y1]
+
+        # outer ring and bullseye
+        tile[(r >= spec.R_RING_IN) & (r <= 1.0)] = 0
+        tile[r <= spec.R_BULLSEYE] = 0
+
+        # data cells
+        data_mask = (r >= spec.R_DATA_IN) & (r < spec.R_DATA_OUT)
+        ring_idx = np.clip(((r - spec.R_DATA_IN) / ring_w).astype(int),
+                           0, spec.RING_COUNT - 1)
+        sec_idx = np.clip((theta / step).astype(int), 0, spec.SECTOR_COUNT - 1)
+        cell_val = grid[ring_idx, sec_idx]  # 1 => black
+        tile[data_mask & (cell_val == 1)] = 0
 
     # downsample (anti-alias)
-    img = img.reshape(size, supersample, size, supersample).mean(axis=(1, 3))
-    return (np.clip(img, 0, 1) * 255).astype(np.uint8)
+    result = img.reshape(size, supersample, size, supersample).mean(axis=(1, 3)).astype(np.uint8)
+    return 255 - result if inverted else result
 
 
 def save_png(arr: np.ndarray, path: str):
-    from PIL import Image
-    Image.fromarray(arr, mode="L").save(path)
+    # OpenCV is already a detector dependency; using it here avoids making
+    # Pillow an undeclared generation-only dependency.
+    import cv2
+    if not cv2.imwrite(path, arr):
+        raise OSError(f"could not write PNG: {path}")
 
 
 def _parse_payload(s: str, n: int) -> bytes:
@@ -81,6 +101,8 @@ if __name__ == "__main__":
                     help="raw payload: hex (0x...) or text (fills payload bytes)")
     ap.add_argument("--out", default="marker.png")
     ap.add_argument("--size", type=int, default=1024)
+    ap.add_argument("--inverted", action="store_true",
+                    help="render white foreground on a black background")
     args = ap.parse_args()
 
     sp = VARIANTS[args.variant]
@@ -92,7 +114,7 @@ if __name__ == "__main__":
         idval = args.id if args.id is not None else 0x1234
         payload = _payload.encode_id(idval, sp)
         desc = f"id=0x{idval:x}"
-    arr = render(payload, sp, size=args.size)
+    arr = render(payload, sp, size=args.size, inverted=args.inverted)
     save_png(arr, args.out)
     # confirm it decodes from its own grid (sanity, not validation)
     back, _ = codec.decode(codec.encode(payload, sp), sp)

@@ -90,6 +90,7 @@ Usage
 
 ```
 python -m marker.generate --variant M --id 0x1234 --out tag.png
+python -m marker.generate --variant M --id 0x1234 --inverted --out inverted-tag.png
 ```
 
 There is also a small command-line app:
