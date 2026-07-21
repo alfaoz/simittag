@@ -1,7 +1,12 @@
 [package]
 name = "simittag-wasm"
-version = "0.1.0"
-edition = "2021"
+description = "wasm bindings for simittag-core (internal; built by rust/build-wasm.sh)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
 
 [lib]
 crate-type = ["cdylib"]

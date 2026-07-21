@@ -2,6 +2,13 @@
 resolver = "2"
 members = ["simittag-core", "simittag-cli", "simittag-wasm"]
 
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "BSD-2-Clause"
+repository = "https://github.com/alfaoz/simittag"
+homepage = "https://github.com/alfaoz/simittag"
+
 [profile.release]
 lto = true
 opt-level = 3

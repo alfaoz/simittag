@@ -66,7 +66,17 @@ The detector identifies the variant automatically. You can also pin it to a sing
 
 Install
 =======
-The Python reference implementation requires NumPy and OpenCV:
+From PyPI:
+
+```
+pip install simittag
+```
+
+This gives you the detector, the marker generator, camera calibration, and the `simittag` command-line tool. The package depends on NumPy and headless OpenCV. If you need OpenCV's GUI functions, install `opencv-python` alongside it.
+
+Prebuilt Rust CLI binaries for Linux (x86_64 and aarch64), macOS (Apple silicon), and Windows are attached to each GitHub release.
+
+From source, the Python reference implementation requires NumPy and OpenCV:
 
 ```
 git clone https://github.com/alfaoz/simittag.git
@@ -95,7 +105,7 @@ python -m marker.generate --variant M --id 0x1234 --out tag.png
 python -m marker.generate --variant M --id 0x1234 --inverted --out inverted-tag.png
 ```
 
-There is also a small command-line app:
+There is also a small command-line app (`simittag` when the package is installed, `python app.py` from a source checkout):
 
 ```
 python app.py encode --id 12345 --out tag.png
@@ -161,7 +171,7 @@ Every decoded detection includes the tag's pose. The translation is expressed in
 
 <img src="docs/images/tag_size.png" alt="Where tag size is measured" width="520">
 
-The camera frame has its origin at the camera center. The z-axis points out of the lens, x is to the right in the image, and y is down. The tag frame is centered on the tag. From the viewer's perspective, x is to the right, y is down, and z points into the tag surface.
+The camera frame has its origin at the camera center. The z-axis points out of the lens, x is to the right in the image, and y is down. This matches the ROS optical frame convention (REP-103), so the pose drops into a ROS pipeline without a frame conversion. The tag frame is centered on the tag. From the viewer's perspective, x is to the right, y is down, and z points into the tag surface.
 
 An ellipse admits two pose interpretations. This is the circular counterpart of the planar pose ambiguity that square tags have. The detector evaluates both interpretations and picks the one confirmed by the decoded data grid. The two solutions converge as the tag becomes fronto-parallel, so the ambiguity is harmless exactly where it is hardest to distinguish.
 
