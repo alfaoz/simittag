@@ -1,0 +1,196 @@
+"""Independent regression tests for public workflows and calibrated accept gates."""
+from __future__ import annotations
+
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from marker.generate import render
+from simittag import codec, detect, payload
+from simittag.spec import VARIANTS
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _naive_render(payload_bytes, spec, size, supersample, margin):
+    """Small, direct definition used to verify the tiled production renderer."""
+    grid = codec.encode(payload_bytes, spec)
+    sample_size = size * supersample
+    center = (sample_size - 1) / 2.0
+    radius_px = (sample_size / 2.0) * (1.0 - margin)
+    ys, xs = np.mgrid[0:sample_size, 0:sample_size]
+    dx = (xs - center) / radius_px
+    dy = (ys - center) / radius_px
+    radius = np.sqrt(dx * dx + dy * dy)
+    theta = np.mod(np.arctan2(dy, dx), 2 * np.pi)
+    image = np.ones((sample_size, sample_size), dtype=np.float32)
+    step = 2 * np.pi / spec.SECTOR_COUNT
+    ring_width = (spec.R_DATA_OUT - spec.R_DATA_IN) / spec.RING_COUNT
+    image[(radius >= spec.R_RING_IN) & (radius <= 1.0)] = 0.0
+    image[radius <= spec.R_BULLSEYE] = 0.0
+    data = (radius >= spec.R_DATA_IN) & (radius < spec.R_DATA_OUT)
+    rings = np.clip(((radius - spec.R_DATA_IN) / ring_width).astype(int),
+                    0, spec.RING_COUNT - 1)
+    sectors = np.clip((theta / step).astype(int), 0, spec.SECTOR_COUNT - 1)
+    image[data & (grid[rings, sectors] == 1)] = 0.0
+    image = image.reshape(size, supersample, size, supersample).mean(axis=(1, 3))
+    return (image * 255).astype(np.uint8)
+
+
+def _radial_clutter_frames(indices=(83, 99)):
+    """Two deterministic near-marker negatives that scored 0.6503/0.6536."""
+    wanted = set(indices)
+    rng = np.random.default_rng(731)
+    for frame_index in range(max(wanted) + 1):
+        image = np.clip(rng.normal(220, 8, (360, 480)), 0, 255).astype(np.uint8)
+        for _ in range(8):
+            center = (int(rng.integers(45, 435)), int(rng.integers(45, 315)))
+            outer = int(rng.integers(14, 48))
+            colors = rng.choice([0, 255], 5)
+            for fraction, color in zip((1, .82, .58, .38, .2), colors):
+                cv2.circle(image, center, max(1, int(outer * fraction)), int(color), -1)
+        for _ in range(8):
+            p1 = (int(rng.integers(0, 480)), int(rng.integers(0, 360)))
+            p2 = (int(rng.integers(0, 480)), int(rng.integers(0, 360)))
+            cv2.line(image, p1, p2, int(rng.integers(0, 256)),
+                     int(rng.integers(1, 7)))
+        if frame_index in wanted:
+            yield frame_index, image
+
+
+class DetectorRegressionTests(unittest.TestCase):
+    def test_outer_ring_occlusion_recovers_from_bullseye(self):
+        image = cv2.imread(str(ROOT / "fixtures/frames/multitag_occl.png"),
+                           cv2.IMREAD_GRAYSCALE)
+        for inverted, frame in ((False, image), (True, 255 - image)):
+            with self.subTest(inverted=inverted):
+                results = detect.detect(frame)
+                decoded = sorted((r["variant"], r["mode"], r["value"])
+                                 for r in results)
+                self.assertEqual(decoded, [
+                    ("M", "ID", 170), ("M", "ID", 187),
+                    ("M", "ID", 204), ("M", "ID", 221),
+                ])
+                self.assertTrue(all(r["inverted"] == inverted for r in results))
+
+    def test_inverted_tags_preserve_range_fixtures(self):
+        cases = (
+            ("range_T_z11_t25.png", "T", "ID", 42),
+            ("range_M_z8_t25.png", "M", "ID", 0xABCDEF),
+            ("range_D_z7_t00.png", "D", "GEO",
+             (48.85837000000001, 2.2944809999999904, 330)),
+        )
+        for filename, variant, mode, value in cases:
+            with self.subTest(variant=variant):
+                image = cv2.imread(str(ROOT / "fixtures/frames" / filename),
+                                   cv2.IMREAD_GRAYSCALE)
+                results = detect.detect(255 - image)
+                self.assertEqual(len(results), 1)
+                result = results[0]
+                self.assertEqual((result["variant"], result["mode"], result["value"]),
+                                 (variant, mode, value))
+                self.assertTrue(result["inverted"])
+
+    def test_mixed_polarity_scene(self):
+        spec = VARIANTS["M"]
+        size = 280
+        canvas = np.full((320, 600), 127, dtype=np.uint8)
+        normal = render(payload.encode_id(111, spec), spec, size=size)
+        inverted = 255 - render(payload.encode_id(222, spec), spec, size=size)
+        canvas[20:300, 10:290] = normal
+        canvas[20:300, 310:590] = inverted
+        results = detect.detect(canvas)
+        decoded = sorted((r["value"], r["inverted"]) for r in results)
+        self.assertEqual(decoded, [(111, False), (222, True)])
+
+    def test_bullseye_fallback_is_not_angle_specific(self):
+        size = 360
+        margin = 0.10
+        value = 0xABC123
+        spec = VARIANTS["M"]
+        base = render(payload.encode_id(value, spec), spec, size=size,
+                      margin=margin)
+        ys, xs = np.mgrid[:size, :size]
+        center = (size - 1) / 2.0
+        radius = size / 2.0 * (1.0 - margin)
+
+        # Remove a cap from four sides. This opens the outer-ring contour but
+        # stops well before the bullseye; the fallback must recover the known
+        # outer scale from the surviving central conic in every orientation.
+        for angle in (0, 90, 180, 270):
+            with self.subTest(angle=angle):
+                radians = np.radians(angle)
+                along = ((xs - center) * np.cos(radians)
+                         + (ys - center) * np.sin(radians)) / radius
+                image = base.copy()
+                image[along < -0.65] = 255
+                image = cv2.GaussianBlur(image, (0, 0), 0.7)
+                decoded = [(r["variant"], r["mode"], r["value"])
+                           for r in detect.detect(image, versions="M")]
+                self.assertEqual(decoded, [("M", "ID", value)])
+
+    def test_radial_clutter_does_not_decode(self):
+        for frame_index, image in _radial_clutter_frames():
+            with self.subTest(frame=frame_index):
+                self.assertEqual(detect.detect(image), [])
+
+    def test_tiled_renderer_matches_direct_definition(self):
+        cases = (("T", 31, 1, .12, 42),
+                 ("M", 63, 3, .07, 0xABCDEF),
+                 ("D", 79, 2, .20, 123456789))
+        for name, size, supersample, margin, value in cases:
+            with self.subTest(variant=name):
+                spec = VARIANTS[name]
+                data = payload.encode_id(value, spec)
+                expected = _naive_render(data, spec, size, supersample, margin)
+                actual = render(data, spec, size, supersample, margin)
+                self.assertTrue(np.array_equal(actual, expected))
+                actual_inverted = render(data, spec, size, supersample, margin,
+                                         inverted=True)
+                self.assertTrue(np.array_equal(actual_inverted, 255 - expected))
+
+    def test_documented_app_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for inverted in (False, True):
+                with self.subTest(inverted=inverted):
+                    marker = Path(directory) / f"tag-{inverted}.png"
+                    command = [sys.executable, "app.py", "encode", "--variant", "T",
+                               "--id", "0x2a", "--size", "256", "--out", str(marker)]
+                    if inverted:
+                        command.append("--inverted")
+                    encoded = subprocess.run(
+                        command, cwd=ROOT, check=True, capture_output=True, text=True)
+                    self.assertIn("decode=('ID', 42)", encoded.stdout)
+                    decoded = subprocess.run(
+                        [sys.executable, "app.py", "decode", str(marker)],
+                        cwd=ROOT, check=True, capture_output=True, text=True)
+                    self.assertIn("T ID=42", decoded.stdout)
+                    polarity = "white-on-black" if inverted else "black-on-white"
+                    self.assertIn(polarity, decoded.stdout)
+
+    def test_malformed_semantics_remain_verified_bytes(self):
+        spec = VARIANTS["M"]
+        malformed_geo = bytes.fromhex("01000000")
+        with self.assertRaisesRegex(ValueError, "GEO body is truncated"):
+            payload.decode(malformed_geo, spec)
+        image = render(malformed_geo, spec, size=256)
+        results = detect.detect(image)
+        self.assertEqual(len(results), 1)
+        self.assertEqual((results[0]["mode"], results[0]["value"]),
+                         ("UNKNOWN", malformed_geo))
+
+    def test_future_payload_version_is_not_misparsed(self):
+        spec = VARIANTS["M"]
+        future_id = bytes.fromhex("1000002a")
+        with self.assertRaisesRegex(ValueError, "version 1"):
+            payload.decode(future_id, spec)
+
+
+if __name__ == "__main__":
+    unittest.main()

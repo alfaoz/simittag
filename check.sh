@@ -23,5 +23,6 @@ python3 -m simittag.gf256
 python3 -m simittag.spec
 python3 -m simittag.codec
 python3 -m simittag.payload
+python3 -m unittest discover -s tests -v
 
 echo "ALL CHECKS PASSED"
