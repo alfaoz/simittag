@@ -128,6 +128,8 @@ pub fn find_marker_ellipses(sharp: &Gray) -> Vec<Candidate> {
             pruned.push(e);
         }
     }
-    pruned.truncate(48);
+    // max-simultaneous-tags cap, mirrored from detect.py (512 covers dense
+    // calibration boards; an 18x13 grid is 234 tags)
+    pruned.truncate(512);
     pruned
 }

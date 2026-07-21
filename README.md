@@ -33,7 +33,9 @@ Table of Contents
 
 Overview
 ========
-A Simittag is made of concentric rings. From the center out these are a black bullseye disk, a quiet ring, several rings of data cells, another quiet ring, and a black outer ring. The detector finds the outer ring and fits an ellipse to it. The pose is recovered from that ellipse. The data cells are then sampled in grayscale and decoded with Reed-Solomon error correction. Cells the sampler is not confident about are passed to the decoder as erasures rather than guesses.
+A Simittag is made of concentric rings. From the center out these are a black bullseye disk, a quiet ring, several rings of data cells, another quiet ring, and a black outer ring. The detector normally finds the outer ring and fits an ellipse to it. If partial occlusion breaks that contour but leaves the bullseye intact, the detector can recover the same projective geometry from the bullseye's known radius. The pose is recovered from that ellipse. The data cells are then sampled in grayscale and decoded with Reed-Solomon error correction. Cells the sampler is not confident about are passed to the decoder as erasures rather than guesses.
+
+Tags may be black on white or inverted white on black, and both polarities can appear in the same frame. Detection results include an `inverted` boolean. The normal black-on-white frontend runs first; the inverted frontend runs only when candidate contrast indicates it is needed, so normal-only scenes keep the original fast path.
 
 <img src="docs/images/anatomy.png" alt="The rings of a Simittag" width="680">
 
@@ -116,7 +118,8 @@ gray = cv2.imread("frame.png", cv2.IMREAD_GRAYSCALE)
 results = detect.detect(gray, DEFAULT)
 
 for r in results:
-    print(r["variant"], r["mode"], r["value"], r["center"], r["tilt_deg"])
+    print(r["variant"], r["mode"], r["value"], r["center"],
+          r["tilt_deg"], r["inverted"])
 ```
 
 Decoding works without camera calibration. For a metrically correct pose, pass your camera intrinsics as a 3×3 matrix with `K=`.
@@ -187,6 +190,8 @@ Timings for a 1280x1280 frame containing six tags, variant auto-detection on, me
 | WASM, single-thread + SIMD | ~35 ms |
 | Python reference (OpenCV, 14 threads) | ~65 ms |
 
+These timings are for normal black-on-white scenes. White-on-black or mixed-polarity scenes add a second threshold/contour pass; it is triggered from candidate contrast rather than paid on every frame.
+
 Detection Range
 ===============
 Measured with an A4-printed tag (175 mm outer diameter) on a 1080p, 60-degree-HFOV camera, under mild defocus, sensor noise, and JPEG compression, 20 random tags per cell. Range is the farthest distance with at least 90% decode.
@@ -201,7 +206,7 @@ The decode floor is the smallest outer-ring diameter, in image pixels, that stil
 
 When a small candidate fails to decode, the detector deconvolves the tag patch (Wiener filter against an assumed Gaussian point-spread) and retries. At long range the limit is not finding the tag, since the outer ring is detected far past the decode floor. The limit is inter-symbol interference: defocus bleeds neighboring data cells into each other. Undoing the blur recovers the bits. The retry runs only after a failed decode on a small candidate, so it adds nothing to healthy frames, and every retry result still has to pass the sync, Reed-Solomon, CRC, and decode-verify gates.
 
-Two accept gates guard the search. A sync-ring correlation gate filters non-tag grids before Reed-Solomon runs. After any successful decode, the observed grid is correlated against the re-encoded decoded pattern (a matched filter of the image against what was decoded) and the result is rejected below 0.65. On measured distributions, correct decodes score at least 0.81 and deliberately manufactured wrong-value collisions at most 0.52, so the gate closes the wrong-ID channel without costing a single correct decode.
+Two accept gates guard the search. A sync-ring correlation gate filters non-tag grids before Reed-Solomon runs. After any successful decode, the observed grid is correlated against the re-encoded decoded pattern (a matched filter of the image against what was decoded) and the result is rejected below 0.73. In calibration, correct decodes scored at least 0.807. Across 600 procedurally generated ring-like clutter frames, CRC-valid wrong-decode candidates scored at most 0.673 and none passed the gate. This leaves a measured empty interval between false and correct candidates while preserving margin for degraded real tags.
 
 Comparison with Other Fiducial Systems
 ======================================

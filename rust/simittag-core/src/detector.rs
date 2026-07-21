@@ -20,7 +20,20 @@ pub struct Detection {
     pub t: V3,
     pub h: M3, // chosen homography (marker plane -> pixels), what pose derives from
     pub tilt_deg: f64,
+    pub inverted: bool,
     pub decoded: Option<(&'static str, &'static str, Value)>, // (variant, mode, value)
+    pub info: Option<DecodeInfo>, // decode diagnostics, present iff decoded
+}
+
+/// Diagnostics for a successful decode (verbose HUD/readout). Report-only:
+/// detection behavior never branches on these.
+#[derive(Clone, Copy)]
+pub struct DecodeInfo {
+    pub rs_erasures: usize,
+    pub rs_corrected: usize,
+    pub verify_corr: f64,
+    pub sync_score: f64,    // normalized -1..1; <0 when the spec has no sync ring
+    pub path: &'static str, // direct | sticker | bullseye | deconv
 }
 
 // ---------------------------------------------------------------------------
@@ -73,6 +86,105 @@ fn rotate_h(h: &M3, dphi: f64) -> M3 {
 fn scale_h(h: &M3, s: f64) -> M3 {
     let d: M3 = [[s, 0.0, 0.0], [0.0, s, 0.0], [0.0, 0.0, 1.0]];
     mat::matmul(h, &d)
+}
+
+/// Project H's unit circle and fit the corresponding image ellipse. Used only
+/// after the bullseye fallback decodes, to report the recovered outer geometry.
+fn ellipse_from_h(h: &M3) -> EllipseGeom {
+    let pts: Vec<(f32, f32)> = (0..128)
+        .map(|i| {
+            let a = 2.0 * std::f64::consts::PI * i as f64 / 128.0;
+            let (x, y) = project(h, a.cos(), a.sin());
+            (x as f32, y as f32)
+        })
+        .collect();
+    fit_ellipse_pts(&pts)
+}
+
+/// Cheap radial photometric gate for an expanded bullseye hypothesis. A real
+/// marker has a dark outer annulus beside a white quiet ring; requiring that
+/// contrast on only a majority of angles keeps partial occlusion admissible.
+fn has_outer_ring_contrast(gray: &Gray, h: &M3, spec: &MarkerSpec) -> bool {
+    let n = 48usize;
+    let black_r = 0.5 * (spec.r_ring_in + 1.0);
+    let quiet_r = 0.5 * (spec.r_data_out + spec.r_ring_in);
+    let mut valid = 0usize;
+    let mut dark = 0usize;
+    for i in 0..n {
+        let a = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
+        let (co, si) = (a.cos(), a.sin());
+        let (bx, by) = project(h, black_r * co, black_r * si);
+        let (qx, qy) = project(h, quiet_r * co, quiet_r * si);
+        let (bv, bok) = sample(gray, bx, by);
+        let (qv, qok) = sample(gray, qx, qy);
+        if bok && qok {
+            valid += 1;
+            dark += (qv - bv > 20.0) as usize;
+        }
+    }
+    valid >= n / 2 && dark as f64 >= 0.55 * n as f64
+}
+
+fn ring_median(gray: &Gray, h: &M3, radius: f64) -> Option<f64> {
+    let mut values = Vec::with_capacity(12);
+    for i in 0..12 {
+        let angle = 2.0 * std::f64::consts::PI * i as f64 / 12.0;
+        let (x, y) = project(h, radius * angle.cos(), radius * angle.sin());
+        let (value, valid) = sample(gray, x, y);
+        if valid {
+            values.push(value);
+        }
+    }
+    if values.len() < 6 {
+        return None;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let middle = values.len() / 2;
+    Some(if values.len() % 2 == 0 {
+        0.5 * (values[middle - 1] + values[middle])
+    } else {
+        values[middle]
+    })
+}
+
+/// Decide whether a second, inverted frontend pass is warranted. The fitted
+/// candidate's center is the bullseye; a center substantially brighter than
+/// either the canonical quiet ring or the contour exterior is white-on-black
+/// evidence. Sorting by the detected inner center rejects the wrong conic pose.
+fn needs_inverted_view(gray: &Gray, candidates: &[Candidate], k: &M3) -> bool {
+    for cand in candidates {
+        let mut hs = pose::pose_homographies(&cand.outer, k);
+        if hs.is_empty() {
+            continue;
+        }
+        if let Some(inner) = &cand.inner {
+            let origin_err = |h: &M3| -> f64 {
+                let hinv = mat::inv3(h);
+                let p = mat::matvec(&hinv, &[inner.cx, inner.cy, 1.0]);
+                ((p[0] / p[2]).powi(2) + (p[1] / p[2]).powi(2)).sqrt()
+            };
+            hs.sort_by(|a, b| origin_err(a).partial_cmp(&origin_err(b)).unwrap());
+        }
+        let h = &hs[0];
+        let (cx, cy) = project(h, 0.0, 0.0);
+        let (center, valid) = sample(gray, cx, cy);
+        if !valid {
+            continue;
+        }
+        let mut reference = f64::INFINITY;
+        // All v1 variants share r_bullseye=.22 and r_data_in=.30.
+        if let Some(value) = ring_median(gray, h, 0.26) {
+            reference = reference.min(value);
+        }
+        // Also catches a surviving white bullseye after outer-ring occlusion.
+        if let Some(value) = ring_median(gray, h, 1.08) {
+            reference = reference.min(value);
+        }
+        if reference.is_finite() && center - reference > 30.0 {
+            return true;
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -173,9 +285,8 @@ fn build_grid(
     if !bok || !qok || (qv - bv).abs() < 20.0 {
         return None;
     }
-    let (black, white) = (bv, qv);
-    let mid = 0.5 * (black + white);
-    let span = (white - black).abs() / 2.0;
+    let mid = 0.5 * (bv + qv);
+    let span = (qv - bv).abs() / 2.0;
     let ncells = spec.ring_count * spec.sector_count;
     let mut grid = vec![0u8; ncells];
     let mut conf = vec![0f32; ncells];
@@ -403,11 +514,14 @@ pub struct DecodeHit {
     pub mode: &'static str,
     pub value: Value,
     pub chosen_h: M3,
+    pub rs: codec::RsStats,
+    pub verify_corr: f64, // decode-verify matched-filter score (gate: VERIFY_MIN)
+    pub sync_score: f64,  // normalized sync-ring correlation; <0 = spec has no sync
 }
 
 // Decode-verify gate + deconvolution retry: constants mirror the Python
 // reference (detect.py), where their calibration data lives.
-const VERIFY_MIN: f64 = 0.65;
+const VERIFY_MIN: f64 = 0.73;
 const DECONV_MAX_PX: f64 = 80.0;
 const DECONV_SIGMAS: [f64; 2] = [1.0, 1.6];
 const DECONV_LAMBDA: f64 = 0.01;
@@ -485,6 +599,31 @@ fn deconv_retry(
     None
 }
 
+/// If an occluder breaks the outer ring, contour detection can still return the
+/// intact bullseye. Since it is a concentric circle on the same plane, scaling
+/// its homography by the known bullseye radius recovers the tag geometry.
+fn bullseye_retry(
+    gray: &Gray,
+    hs: &[M3],
+    specs: &[&'static MarkerSpec],
+    conf_erasure: f32,
+) -> Option<DecodeHit> {
+    for sp in specs {
+        let expanded: Vec<M3> = hs
+            .iter()
+            .map(|h| scale_h(h, 1.0 / sp.r_bullseye))
+            .filter(|h| has_outer_ring_contrast(gray, h, sp))
+            .collect();
+        if expanded.is_empty() {
+            continue;
+        }
+        if let Some(hit) = try_decode_spec(gray, &expanded, sp, conf_erasure) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
 fn try_decode_spec(
     gray: &Gray,
     hs: &[M3],
@@ -503,14 +642,18 @@ fn try_decode_spec(
                     Some(v) => v,
                     None => continue,
                 };
-                if spec.has_sync {
+                let sync_score = if spec.has_sync {
                     let (_, scores) = codec::find_rotation(&grid[..spec.sector_count], spec);
-                    if (*scores.iter().max().unwrap() as f64) < sync_min {
+                    let best = *scores.iter().max().unwrap() as f64;
+                    if best < sync_min {
                         continue;
                     }
-                }
-                let (pb, sh) = codec::decode_conf(&grid, spec, &conf, conf_erasure);
-                if let Some(pb) = pb {
+                    best / spec.sector_count as f64
+                } else {
+                    -1.0
+                };
+                let (res, sh) = codec::decode_conf(&grid, spec, &conf, conf_erasure);
+                if let Some((pb, rs)) = res {
                     let theta0 = phi0 + sh as f64 * step;
                     let ref_grid = codec::encode(&pb, spec).unwrap();
                     let (refined, vcorr) =
@@ -518,7 +661,7 @@ fn try_decode_spec(
                     // Decode-verify gate: matched filter of the image against
                     // the decoded codeword's full grid; rejects wrong-value
                     // RS+CRC collisions (see the Python reference for the
-                    // measured calibration behind 0.65).
+                    // measured calibration behind VERIFY_MIN).
                     if vcorr < VERIFY_MIN {
                         continue;
                     }
@@ -529,13 +672,16 @@ fn try_decode_spec(
                     let chosen_h = rotate_h(&hs_, theta);
                     let (mode, value) = match payload::decode(&pb, spec) {
                         Ok((m, v)) => (m, v),
-                        Err(_) => ("?", Value::Bytes(pb)),
+                        Err(_) => ("UNKNOWN", Value::Bytes(pb)),
                     };
                     return Some(DecodeHit {
                         variant: spec.name,
                         mode,
                         value,
                         chosen_h,
+                        rs,
+                        verify_corr: vcorr,
+                        sync_score,
                     });
                 }
             }
@@ -565,12 +711,39 @@ pub fn detect_markers(
         None => gray_raw,
     };
     let gray = sharpen(gray_in, 0.6, 1.0);
-    let cands: Vec<Candidate> = find_marker_ellipses(&gray);
+    let normal_cands = find_marker_ellipses(&gray);
+    let inverse = if needs_inverted_view(&gray, &normal_cands, k) {
+        let raw = Gray {
+            w: gray_in.w,
+            h: gray_in.h,
+            px: gray_in.px.iter().map(|&v| 255 - v).collect(),
+        };
+        Some(sharpen(&raw, 0.6, 1.0))
+    } else {
+        None
+    };
+    let mut cands: Vec<(Candidate, bool)> = normal_cands
+        .into_iter()
+        .map(|candidate| (candidate, false))
+        .collect();
+    if let Some(inverse_view) = &inverse {
+        cands.extend(
+            find_marker_ellipses(inverse_view)
+            .into_iter()
+            .map(|candidate| (candidate, true)),
+        );
+    }
     // per-candidate work is independent; map preserves candidate order, so the
     // result is identical to the sequential loop (parity gates re-run green)
-    let process = |cand: &Candidate| -> Option<Detection> {
+    let process = |entry: &(Candidate, bool)| -> Option<Detection> {
+        let (cand, inverted) = entry;
+        let work_gray = if *inverted {
+            inverse.as_ref().unwrap()
+        } else {
+            &gray
+        };
         let geom0 = cand.outer;
-        let refined = refine_ellipse(&gray, &geom0);
+        let refined = refine_ellipse(work_gray, &geom0);
         let geom1 = refined.unwrap_or(geom0);
         let mut hs = pose::pose_homographies(&geom1, k);
         let mut hs_coarse = if refined.is_some() && geom1.major.max(geom1.minor) < 100.0 {
@@ -591,9 +764,10 @@ pub fn detect_markers(
             hs_coarse.sort_by(|a, b| origin_err(a).partial_cmp(&origin_err(b)).unwrap());
         }
         hs.extend(hs_coarse);
+        let mut path = "direct";
         let mut hit = None;
         for sp in specs {
-            hit = try_decode_spec(&gray, &hs, sp, conf_erasure);
+            hit = try_decode_spec(work_gray, &hs, sp, conf_erasure);
             if hit.is_some() {
                 break;
             }
@@ -603,7 +777,7 @@ pub fn detect_markers(
         // the largest suppressed round child (the tag ring inside a label)
         if hit.is_none() {
             if let Some(alt) = &cand.alt {
-                let alt1 = refine_ellipse(&gray, alt).unwrap_or(*alt);
+                let alt1 = refine_ellipse(work_gray, alt).unwrap_or(*alt);
                 let mut hs_alt = pose::pose_homographies(&alt1, k);
                 if let Some(inner) = &cand.inner {
                     let origin_err = |h: &M3| -> f64 {
@@ -614,24 +788,44 @@ pub fn detect_markers(
                     hs_alt.sort_by(|a, b| origin_err(a).partial_cmp(&origin_err(b)).unwrap());
                 }
                 for sp in specs {
-                    hit = try_decode_spec(&gray, &hs_alt, sp, conf_erasure);
+                    hit = try_decode_spec(work_gray, &hs_alt, sp, conf_erasure);
                     if hit.is_some() {
                         geom_rep = alt1; // report the TAG's geometry
+                        path = "sticker";
                         break;
                     }
                 }
             }
         }
+        // Occlusion fallback: the candidate can be the surviving bullseye when
+        // the marker's outer ring is no longer a closed contour.
+        if hit.is_none() {
+            hit = bullseye_retry(work_gray, &hs, specs, conf_erasure);
+            if let Some(decoded) = &hit {
+                geom_rep = ellipse_from_h(&decoded.chosen_h);
+                path = "bullseye";
+            }
+        }
         // ISI retry: small candidate, all attempts failed -> deconvolve the
         // patch and search again (see deconv_retry above).
         if hit.is_none() {
-            hit = deconv_retry(&gray, &geom1, &hs, specs, conf_erasure);
+            hit = deconv_retry(work_gray, &geom1, &hs, specs, conf_erasure);
+            if hit.is_some() {
+                path = "deconv";
+            }
         }
         if hit.is_none() && (cand.inner.is_none() || !pose_only) {
             return None;
         }
         let chosen_h = hit.as_ref().map(|h| h.chosen_h).unwrap_or(hs[0]);
         let (r, t) = pose::decompose_h(&chosen_h, k);
+        let info = hit.as_ref().map(|h| DecodeInfo {
+            rs_erasures: h.rs.erasures,
+            rs_corrected: h.rs.corrected,
+            verify_corr: h.verify_corr,
+            sync_score: h.sync_score,
+            path,
+        });
         Some(Detection {
             center: (geom_rep.cx, geom_rep.cy),
             axes: (geom_rep.major, geom_rep.minor),
@@ -640,7 +834,9 @@ pub fn detect_markers(
             t,
             h: chosen_h,
             tilt_deg: pose::tilt_from_h(&chosen_h, k),
+            inverted: *inverted,
             decoded: hit.map(|h| (h.variant, h.mode, h.value)),
+            info,
         })
     };
     #[cfg(feature = "parallel")]
@@ -652,7 +848,16 @@ pub fn detect_markers(
     let mut out: Vec<Detection> = cands.iter().filter_map(process).collect();
     // de-dup: keep the larger-radius detection within a center-proximity cluster
     out.sort_by(|a, b| {
-        b.axes.0.max(b.axes.1).partial_cmp(&a.axes.0.max(a.axes.1)).unwrap()
+        b.decoded
+            .is_some()
+            .cmp(&a.decoded.is_some())
+            .then_with(|| {
+                b.axes
+                    .0
+                    .max(b.axes.1)
+                    .partial_cmp(&a.axes.0.max(a.axes.1))
+                    .unwrap()
+            })
     });
     let mut kept: Vec<Detection> = Vec::new();
     for d in out {
@@ -686,10 +891,37 @@ pub fn detect(
         None => gray_raw,
     };
     let gray = sharpen(gray_in, 0.6, 1.0);
-    let cands = find_marker_ellipses(&gray);
-    let process = |cand: &Candidate| -> Option<Detection> {
+    let normal_cands = find_marker_ellipses(&gray);
+    let inverse = if needs_inverted_view(&gray, &normal_cands, k) {
+        let raw = Gray {
+            w: gray_in.w,
+            h: gray_in.h,
+            px: gray_in.px.iter().map(|&v| 255 - v).collect(),
+        };
+        Some(sharpen(&raw, 0.6, 1.0))
+    } else {
+        None
+    };
+    let mut cands: Vec<(Candidate, bool)> = normal_cands
+        .into_iter()
+        .map(|candidate| (candidate, false))
+        .collect();
+    if let Some(inverse_view) = &inverse {
+        cands.extend(
+            find_marker_ellipses(inverse_view)
+            .into_iter()
+            .map(|candidate| (candidate, true)),
+        );
+    }
+    let process = |entry: &(Candidate, bool)| -> Option<Detection> {
+        let (cand, inverted) = entry;
+        let work_gray = if *inverted {
+            inverse.as_ref().unwrap()
+        } else {
+            &gray
+        };
         let geom0 = cand.outer;
-        let refined = refine_ellipse(&gray, &geom0);
+        let refined = refine_ellipse(work_gray, &geom0);
         let geom1 = refined.unwrap_or(geom0);
         let mut hs = pose::pose_homographies(&geom1, k);
         if refined.is_some() && geom1.major.max(geom1.minor) < 100.0 {
@@ -698,9 +930,10 @@ pub fn detect(
         if hs.is_empty() {
             return None;
         }
+        let mut path = "direct";
         let mut found: Option<(DecodeHit, EllipseGeom)> = None;
         for sp in specs {
-            if let Some(hit) = try_decode_spec(&gray, &hs, sp, conf_erasure) {
+            if let Some(hit) = try_decode_spec(work_gray, &hs, sp, conf_erasure) {
                 found = Some((hit, geom1));
                 break;
             }
@@ -708,20 +941,32 @@ pub fn detect(
         if found.is_none() {
             if let Some(alt) = &cand.alt {
                 // circular-sticker fallback (see detect_markers)
-                let alt1 = refine_ellipse(&gray, alt).unwrap_or(*alt);
+                let alt1 = refine_ellipse(work_gray, alt).unwrap_or(*alt);
                 let hs_alt = pose::pose_homographies(&alt1, k);
                 for sp in specs {
-                    if let Some(hit) = try_decode_spec(&gray, &hs_alt, sp, conf_erasure) {
+                    if let Some(hit) = try_decode_spec(work_gray, &hs_alt, sp, conf_erasure) {
                         found = Some((hit, alt1));
+                        path = "sticker";
                         break;
                     }
                 }
             }
         }
+        // Occlusion fallback: retry a surviving bullseye at outer-ring scale.
+        if found.is_none() {
+            found = bullseye_retry(work_gray, &hs, specs, conf_erasure).map(|hit| {
+                let g = ellipse_from_h(&hit.chosen_h);
+                path = "bullseye";
+                (hit, g)
+            });
+        }
         // ISI retry: deconvolve small failed candidates (see detect_markers)
         if found.is_none() {
-            found = deconv_retry(&gray, &geom1, &hs, specs, conf_erasure)
-                .map(|hit| (hit, geom1));
+            found = deconv_retry(work_gray, &geom1, &hs, specs, conf_erasure)
+                .map(|hit| {
+                    path = "deconv";
+                    (hit, geom1)
+                });
         }
         found.map(|(hit, g)| {
             let (r, t) = pose::decompose_h(&hit.chosen_h, k);
@@ -733,6 +978,14 @@ pub fn detect(
                 t,
                 h: hit.chosen_h,
                 tilt_deg: pose::tilt_from_h(&hit.chosen_h, k),
+                inverted: *inverted,
+                info: Some(DecodeInfo {
+                    rs_erasures: hit.rs.erasures,
+                    rs_corrected: hit.rs.corrected,
+                    verify_corr: hit.verify_corr,
+                    sync_score: hit.sync_score,
+                    path,
+                }),
                 decoded: Some((hit.variant, hit.mode, hit.value)),
             }
         })
@@ -744,4 +997,61 @@ pub fn detect(
     }
     #[cfg(not(feature = "parallel"))]
     cands.iter().filter_map(process).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec;
+
+    fn render_tag(sp: &MarkerSpec, value: u128, inverted: bool) -> Gray {
+        let size = 360usize;
+        let grid = codec::encode(&payload::encode_id(value, sp).unwrap(), sp).unwrap();
+        let center = (size as f64 - 1.0) / 2.0;
+        let radius_px = size as f64 / 2.0 * 0.88;
+        let ring_width = (sp.r_data_out - sp.r_data_in) / sp.ring_count as f64;
+        let sector_step = 2.0 * std::f64::consts::PI / sp.sector_count as f64;
+        let mut px = vec![255u8; size * size];
+        for y in 0..size {
+            for x in 0..size {
+                let dx = (x as f64 - center) / radius_px;
+                let dy = (y as f64 - center) / radius_px;
+                let radius = (dx * dx + dy * dy).sqrt();
+                let mut value_px = 255u8;
+                if (sp.r_ring_in..=1.0).contains(&radius) || radius <= sp.r_bullseye {
+                    value_px = 0;
+                } else if (sp.r_data_in..sp.r_data_out).contains(&radius) {
+                    let ring = (((radius - sp.r_data_in) / ring_width) as usize)
+                        .min(sp.ring_count - 1);
+                    let angle = dy.atan2(dx).rem_euclid(2.0 * std::f64::consts::PI);
+                    let sector = ((angle / sector_step) as usize).min(sp.sector_count - 1);
+                    if grid[ring * sp.sector_count + sector] == 1 {
+                        value_px = 0;
+                    }
+                }
+                px[y * size + x] = if inverted { 255 - value_px } else { value_px };
+            }
+        }
+        Gray { w: size, h: size, px }
+    }
+
+    #[test]
+    fn detects_both_polarities_for_every_variant() {
+        let size = 360.0;
+        let f = (size / 2.0) / (std::f64::consts::PI / 6.0).tan();
+        let k = [[f, 0.0, 179.5], [0.0, f, 179.5], [0.0, 0.0, 1.0]];
+        for &(sp, value) in &[(&spec::T, 42), (&spec::M, 0xabcdef), (&spec::D, 123456789)] {
+            for inverted in [false, true] {
+                let image = render_tag(sp, value, inverted);
+                let hits = detect(&image, &k, &[sp], 0.25, None);
+                assert_eq!(hits.len(), 1, "{} inverted={}", sp.name, inverted);
+                assert_eq!(hits[0].inverted, inverted);
+                assert!(matches!(
+                    hits[0].decoded,
+                    Some((variant, "ID", Value::Int(got)))
+                        if variant == sp.name && got == value
+                ));
+            }
+        }
+    }
 }

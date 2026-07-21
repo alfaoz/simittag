@@ -131,9 +131,14 @@ pub fn detect(
             .iter()
             .flat_map(|row| row.iter().map(|v| format!("{:.9}", v)))
             .collect();
+        let hflat: Vec<String> = d
+            .h
+            .iter()
+            .flat_map(|row| row.iter().map(|v| format!("{:.9}", v)))
+            .collect();
         out.push_str(&format!(
             "{{\"center\":[{:.3},{:.3}],\"axes\":[{:.3},{:.3}],\"angle\":{:.3},\
-             \"R\":[{}],\"t\":[{:.6},{:.6},{:.6}],\"tilt_deg\":{:.2},\"decoded\":{}",
+             \"R\":[{}],\"t\":[{:.6},{:.6},{:.6}],\"h\":[{}],\"tilt_deg\":{:.2},\"decoded\":{},\"inverted\":{}",
             d.center.0,
             d.center.1,
             d.axes.0,
@@ -143,9 +148,20 @@ pub fn detect(
             d.t[0],
             d.t[1],
             d.t[2],
+            hflat.join(","),
             d.tilt_deg,
-            d.decoded.is_some()
+            d.decoded.is_some(),
+            d.inverted
         ));
+        if let Some(info) = &d.info {
+            out.push_str(&format!(
+                ",\"rs_corrected\":{},\"rs_erasures\":{},\"verify\":{:.3},\"path\":\"{}\"",
+                info.rs_corrected, info.rs_erasures, info.verify_corr, info.path
+            ));
+            if info.sync_score >= 0.0 {
+                out.push_str(&format!(",\"sync\":{:.3}", info.sync_score));
+            }
+        }
         if let Some((variant, mode, value)) = &d.decoded {
             out.push_str(&format!(",\"variant\":\"{}\",\"mode\":\"{}\"", variant, mode));
             match value {

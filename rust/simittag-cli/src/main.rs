@@ -235,6 +235,7 @@ fn parity_codec(path: &str) -> bool {
                         .map(|v| v.as_f64().unwrap() as f32)
                         .collect();
                     let (got, gsh) = codec::decode_conf(&gmut, sp, &conf, 0.25);
+                    let got = got.map(|(pb, _)| pb);
                     let want = &sub["out"];
                     let matches = match (&got, want) {
                         (None, J::Null) => true,
@@ -657,7 +658,7 @@ fn value_matches_det(val: &simittag_core::payload::Value, want: &J) -> bool {
 }
 
 fn parity_detect(fixtures_dir: &str) -> bool {
-    use simittag_core::{detector, image, mat::M3, spec};
+    use simittag_core::{detector, mat::M3, spec};
     let fx = load(&format!("{}/frames.json", fixtures_dir));
     let mut g = Gate::new("detect");
     let mut worst_tilt = 0f64;
@@ -743,6 +744,55 @@ fn parity_detect(fixtures_dir: &str) -> bool {
             }
         }
         g.check(frame_ok, || why.clone());
+
+        // The same fixture, luminance-inverted, must produce identical decode
+        // and pose decisions through the white-on-black frontend.
+        let inverted_src = simittag_core::image::Gray {
+            w: src.w,
+            h: src.h,
+            px: src.px.iter().map(|&v| 255 - v).collect(),
+        };
+        let inverted_dets = detector::detect_markers(
+            &inverted_src, &k, &specs, 0.25, true, dist.as_deref());
+        let normal_decoded: Vec<_> = dets.iter().filter(|d| d.decoded.is_some()).collect();
+        let inverted_decoded: Vec<_> = inverted_dets
+            .iter()
+            .filter(|d| d.decoded.is_some())
+            .collect();
+        let mut inverted_ok = inverted_decoded.len() == normal_decoded.len();
+        let mut inverted_why = if inverted_ok {
+            String::new()
+        } else {
+            format!(
+                "{} inverted: {} decoded != {}",
+                file,
+                inverted_decoded.len(),
+                normal_decoded.len()
+            )
+        };
+        let mut used_normal = vec![false; normal_decoded.len()];
+        for d in inverted_decoded {
+            let matched = normal_decoded.iter().enumerate().position(|(i, normal)| {
+                !used_normal[i]
+                    && ((d.center.0 - normal.center.0).powi(2)
+                        + (d.center.1 - normal.center.1).powi(2))
+                    .sqrt() < 0.1
+                    && d.decoded == normal.decoded
+                    && (d.tilt_deg - normal.tilt_deg).abs() < 0.05
+                    && (d.t[2] - normal.t[2]).abs() / normal.t[2].abs().max(1e-9) < 0.001
+                    && d.inverted
+            });
+            if let Some(i) = matched {
+                used_normal[i] = true;
+            } else {
+                inverted_ok = false;
+                inverted_why = format!(
+                    "{} inverted: unmatched detection at ({:.0},{:.0})",
+                    file, d.center.0, d.center.1);
+                break;
+            }
+        }
+        g.check(inverted_ok, || inverted_why.clone());
     }
     println!("  worst tilt diff {:.4} deg, worst depth diff {:.4}%",
              worst_tilt, worst_depth * 100.0);
@@ -842,10 +892,10 @@ fn det_to_json(d: &simittag_core::detector::Detection) -> String {
     };
     let mut s = format!(
         "{{\"center\":[{:.10},{:.10}],\"axes\":[{:.10},{:.10}],\"angle\":{:.10},\
-         \"R\":[{}],\"t\":[{:.17e},{:.17e},{:.17e}],\"H\":[{}],\"tilt_deg\":{:.10},\"decoded\":{}",
+         \"R\":[{}],\"t\":[{:.17e},{:.17e},{:.17e}],\"H\":[{}],\"tilt_deg\":{:.10},\"decoded\":{},\"inverted\":{}",
         d.center.0, d.center.1, d.axes.0, d.axes.1, d.angle,
         flat(&d.r), d.t[0], d.t[1], d.t[2], flat(&d.h), d.tilt_deg,
-        d.decoded.is_some()
+        d.decoded.is_some(), d.inverted
     );
     if let Some((variant, mode, value)) = &d.decoded {
         s.push_str(&format!(",\"variant\":\"{}\",\"mode\":\"{}\"", variant, mode));

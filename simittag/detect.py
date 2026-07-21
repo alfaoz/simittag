@@ -35,6 +35,11 @@ SYNC_MIN = 0.70
 DECONV_SMALL = True
 DECONV_MAX_PX = 80        # only retry candidates smaller than this (major axis)
 DECONV_SIGMAS = (1.0, 1.6)  # assumed PSF sigmas (image px) to try
+# If an occluder breaks the outer ring, the intact bullseye can still be fitted.
+# It is a concentric circle on the same plane, so its conic supplies the same pose
+# after scaling by its known radius. This fallback is decode-verified like every
+# other geometry hypothesis and runs only after the normal outer/label attempts.
+BULLSEYE_FALLBACK = True
 # NOTE: no upsampling before the FFT -- measured STRICTLY BETTER than cubic
 # 2x/3x upsample variants (up=3 cost D@7.5m 29->19/30; cubic overshoot is
 # amplified by the Wiener filter), and native-res sampling keeps the Rust port
@@ -45,9 +50,11 @@ DECONV_SIGMAS = (1.0, 1.6)  # assumed PSF sigmas (image px) to try
 # wrong-value RS+CRC collisions that no sync gate can catch (the sync ring is
 # genuinely present on a true tag at the range floor). Calibrated on measured
 # distributions (sim/exp_verify*.py): right-value corr min 0.807 over 341
-# accepts; manufactured wrong-value accepts max 0.517 over 75 -- 0.65 sits in
-# the middle of an empty 0.29-wide gap.
-VERIFY_MIN = 0.65
+# accepts. Across 600 seeded radial-clutter negatives, CRC-valid wrong-decode
+# candidates reached 0.673 but none cleared 0.73; the weakest current
+# fixture/video accept is 0.889. The threshold deliberately sits inside that
+# measured empty interval, with a little more margin on the recall side.
+VERIFY_MIN = 0.73
 _VERIFY_LOG = None        # experiment hook: (corr, variant, decoded) tuples
 
 
@@ -267,9 +274,59 @@ def _find_marker_ellipses(gray):
             pruned.append(e)
     # Cap so a pathological frame can't blow up the decode budget. With nested inner
     # rings now suppressed each candidate is ~one distinct tag, so this is effectively
-    # a max-simultaneous-tags limit; 48 supports dense multi-tag scenes while bounding
-    # worst-case cost (each candidate costs specs x scales x phase decode attempts).
-    return pruned[:48]
+    # a max-simultaneous-tags limit; 512 covers dense calibration boards (an 18x13
+    # grid is 234 tags) while still bounding worst-case cost (each candidate costs
+    # specs x scales x phase decode attempts). Mirrored in rust frontend.rs.
+    return pruned[:512]
+
+
+def _needs_inverted_view(gray, candidates, K):
+    """Cheap evidence test for at least one white-on-black candidate."""
+    angles = np.linspace(0.0, 2 * np.pi, 12, endpoint=False)
+    radii = np.concatenate([np.full(12, 0.26), np.full(12, 1.08)])
+    X = radii * np.tile(np.cos(angles), 2)
+    Y = radii * np.tile(np.sin(angles), 2)
+    for ei, inner, _alt in candidates:
+        geom = (ei[0], ei[1], ei[2])
+        Hs = pose.pose_homographies(geom, K)
+        if not Hs:
+            continue
+        if inner is not None:
+            icx, icy = inner[0]
+
+            def origin_error(H):
+                point = np.linalg.inv(H) @ np.array([icx, icy, 1.0])
+                return np.hypot(point[0] / point[2], point[1] / point[2])
+
+            Hs = sorted(Hs, key=origin_error)
+        px, py = _project(Hs[0], np.concatenate([[0.0], X]),
+                          np.concatenate([[0.0], Y]))
+        values, valid = _sample_many(gray, px, py)
+        if not valid[0]:
+            continue
+        references = []
+        for section in (slice(1, 13), slice(13, 25)):
+            samples = values[section][valid[section]]
+            if len(samples) >= 6:
+                references.append(float(np.median(samples)))
+        # The center is the bullseye. Compare both its canonical quiet ring
+        # and just outside the fitted contour: the latter also recognizes a
+        # surviving white bullseye when an inverted outer ring is occluded.
+        if references and values[0] - min(references) > 30:
+            return True
+    return False
+
+
+def _candidate_views(gray, K):
+    """Candidates paired with a canonical black-on-white grayscale view."""
+    normal = _sharpen(gray)
+    normal_candidates = _find_marker_ellipses(normal)
+    out = [(candidate, normal, False) for candidate in normal_candidates]
+    if _needs_inverted_view(normal, normal_candidates, K):
+        inverse = _sharpen(255 - gray)
+        out.extend((candidate, inverse, True)
+                   for candidate in _find_marker_ellipses(inverse))
+    return out
 
 
 def _refine_ellipse(gray, geom, n_rays=128):
@@ -392,6 +449,32 @@ def _rotate_H(H, dphi):
     c, s = np.cos(dphi), np.sin(dphi)
     Rz = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1.0]])
     return H @ Rz
+
+
+def _ellipse_from_H(H, n=128):
+    """Projected unit circle of H -> cv2 ellipse geometry."""
+    a = np.linspace(0.0, 2 * np.pi, n, endpoint=False)
+    xs, ys = _project(H, np.cos(a), np.sin(a))
+    ok = np.isfinite(xs) & np.isfinite(ys)
+    if ok.sum() < 5:
+        return None
+    return cv2.fitEllipse(np.stack([xs[ok], ys[ok]], axis=1).astype(np.float32))
+
+
+def _has_outer_ring_contrast(gray, H, spec, n=48):
+    """Cheap occlusion-tolerant gate for an expanded bullseye hypothesis."""
+    a = np.linspace(0.0, 2 * np.pi, n, endpoint=False)
+    black_r = 0.5 * (spec.R_RING_IN + 1.0)
+    quiet_r = 0.5 * (spec.R_DATA_OUT + spec.R_RING_IN)
+    xs = np.concatenate([black_r * np.cos(a), quiet_r * np.cos(a)])
+    ys = np.concatenate([black_r * np.sin(a), quiet_r * np.sin(a)])
+    px, py = _project(H, xs, ys)
+    vals, valid = _sample_many(gray, px, py)
+    outer, quiet = vals[:n], vals[n:]
+    ok = valid[:n] & valid[n:]
+    # A partial occluder may replace a contiguous arc with background, so only
+    # require a majority of the still-comparable radial pairs to show the ring.
+    return ok.sum() >= n // 2 and np.count_nonzero((quiet - outer > 20) & ok) >= 0.55 * n
 
 
 _REFINE_CACHE = {}
@@ -525,7 +608,7 @@ def _try_decode_spec(gray, Hs, spec, conf_erasure):
                     try:
                         decoded = payload.decode(pb, spec)
                     except Exception:
-                        decoded = ("?", pb)
+                        decoded = ("UNKNOWN", pb)
                     if _VERIFY_LOG is not None:
                         _VERIFY_LOG.append((vcorr, spec.NAME, decoded))
                     # Decode-verify gate: the refine correlation IS a matched
@@ -542,6 +625,29 @@ def _try_decode_spec(gray, Hs, spec, conf_erasure):
                     chosen_H = _rotate_H(Hs_, theta)
                     return (spec.NAME, decoded), chosen_H
     return None, None
+
+
+def _try_bullseye_fallback(gray, Hs, specs, conf_erasure):
+    """
+    Retry an undecoded ellipse as the marker's bullseye rather than its outer
+    ring. A surviving bullseye remains a complete conic under partial outer-ring
+    occlusion, and its known radius recovers the outer-circle homography exactly.
+    """
+    if not BULLSEYE_FALLBACK:
+        return None, None, None
+    for sp in specs:
+        expanded = []
+        for H in Hs:
+            Hb = H @ np.diag([1.0 / sp.R_BULLSEYE,
+                              1.0 / sp.R_BULLSEYE, 1.0])
+            if _has_outer_ring_contrast(gray, Hb, sp):
+                expanded.append(Hb)
+        if not expanded:
+            continue
+        decoded, H = _try_decode_spec(gray, expanded, sp, conf_erasure)
+        if decoded is not None:
+            return decoded, H, _ellipse_from_H(H)
+    return None, None, None
 
 
 def detect_markers(gray, spec=None, K=None, conf_erasure=0.25, versions=None,
@@ -565,8 +671,8 @@ def detect_markers(gray, spec=None, K=None, conf_erasure=0.25, versions=None,
     the frame is undistorted once up front (see _undistort). None/zeros = pinhole.
     All returned pixel coords (center/axes) are in UNDISTORTED image space.
 
-    Returns list of dicts: center, axes, angle, R, t (camera frame), tilt_deg, decoded,
-    and if it Simittag-decodes: variant, mode, value.
+    Returns list of dicts: center, axes, angle, R, t (camera frame), tilt_deg,
+    decoded, inverted, and if it Simittag-decodes: variant, mode, value.
     """
     if gray.ndim == 3:
         gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
@@ -574,12 +680,12 @@ def detect_markers(gray, spec=None, K=None, conf_erasure=0.25, versions=None,
         K = default_K(gray.shape[1], gray.shape[0])
     if dist is not None:
         gray = _undistort(gray, K, dist)
-    gray = _sharpen(gray)
     if versions is None and spec is not None:
         versions = spec.NAME
     specs = resolve_specs(versions)
     out = []
-    for ei, inner, alt in _find_marker_ellipses(gray):
+    candidates = _candidate_views(gray, K)
+    for (ei, inner, alt), gray, inverted in candidates:
         geom0 = (ei[0], ei[1], ei[2])
         geom1 = _refine_ellipse(gray, geom0)
         (cx, cy), (MA, ma), ang = geom1
@@ -630,6 +736,16 @@ def detect_markers(gray, spec=None, K=None, conf_erasure=0.25, versions=None,
                     geom1 = alt1                # report the TAG's geometry
                     (cx, cy), (MA, ma), ang = geom1
                     break
+        # Occlusion fallback: a broken outer ring may leave the bullseye as the
+        # largest fitted conic. Its known relative radius recovers tag geometry.
+        if decoded is None:
+            decoded, H, outer_geom = _try_bullseye_fallback(
+                gray, Hs, specs, conf_erasure)
+            if decoded is not None:
+                chosen_H = H
+                if outer_geom is not None:
+                    geom1 = outer_geom
+                    (cx, cy), (MA, ma), ang = geom1
         # ISI retry: small candidate, all attempts failed -> deconvolve the patch
         # and search again (see DECONV_SMALL above).
         if decoded is None and DECONV_SMALL and max(MA, ma) < DECONV_MAX_PX:
@@ -653,13 +769,15 @@ def detect_markers(gray, spec=None, K=None, conf_erasure=0.25, versions=None,
         R, t = pose.decompose_H(chosen_H, K)
         rec = {"center": (cx, cy), "axes": (MA, ma), "angle": ang,
                "R": R, "t": t, "tilt_deg": pose.tilt_from_H(chosen_H, K),
-               "decoded": decoded is not None}
+               "decoded": decoded is not None, "inverted": inverted}
         if decoded:
             rec["variant"], (rec["mode"], rec["value"]) = decoded
         out.append(rec)
     # de-dup overlapping detections (same physical marker fit at 2 edges/scales):
     # keep the larger-radius one within a center-proximity cluster.
-    out.sort(key=lambda r: -max(r["axes"]))
+    # A decoded result always beats an overlapping pose-only hypothesis from
+    # the opposite-polarity view; within each class keep the larger fit.
+    out.sort(key=lambda r: (not r["decoded"], -max(r["axes"])))
     kept = []
     for r in out:
         cx0, cy0 = r["center"]; R0 = max(r["axes"]) / 2
@@ -672,9 +790,9 @@ def detect_markers(gray, spec=None, K=None, conf_erasure=0.25, versions=None,
 def detect(gray, spec=None, K=None, conf_erasure=0.25, versions=None, dist=None):
     """
     Headless decode-only detector for validation harnesses. Returns
-    only successfully decoded markers, with mode/value/variant/H. `spec` pins a single
-    variant (back-compat); `versions` selects the auto/specific set. `dist` as in
-    detect_markers.
+    only successfully decoded markers, with mode/value/variant/H and an `inverted`
+    polarity flag. `spec` pins a single variant (back-compat); `versions` selects
+    the auto/specific set. `dist` as in detect_markers.
     """
     if gray.ndim == 3:
         gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
@@ -682,12 +800,12 @@ def detect(gray, spec=None, K=None, conf_erasure=0.25, versions=None, dist=None)
         K = default_K(gray.shape[1], gray.shape[0])
     if dist is not None:
         gray = _undistort(gray, K, dist)
-    gray = _sharpen(gray)
     if versions is None and spec is not None:
         versions = spec.NAME
     specs = resolve_specs(versions)
     results = []
-    for ei, _inner, alt in _find_marker_ellipses(gray):
+    candidates = _candidate_views(gray, K)
+    for (ei, _inner, alt), gray, inverted in candidates:
         geom0 = (ei[0], ei[1], ei[2])
         geom1 = _refine_ellipse(gray, geom0)
         (cx, cy), (MA, ma), ang = geom1
@@ -712,6 +830,13 @@ def detect(gray, spec=None, K=None, conf_erasure=0.25, versions=None, dist=None)
                 if decoded is not None:
                     hit = (decoded, H, alt1)
                     break
+        # Occlusion fallback: retry a surviving bullseye at the known outer-ring
+        # scale. Report geometry projected from the recovered tag homography.
+        if hit is None:
+            decoded, H, outer_geom = _try_bullseye_fallback(
+                gray, Hs, specs, conf_erasure)
+            if decoded is not None:
+                hit = (decoded, H, outer_geom if outer_geom is not None else geom1)
         # ISI retry: deconvolve small failed candidates (see detect_markers)
         if hit is None and DECONV_SMALL and max(MA, ma) < DECONV_MAX_PX:
             for sg in DECONV_SIGMAS:
@@ -734,5 +859,6 @@ def detect(gray, spec=None, K=None, conf_erasure=0.25, versions=None, dist=None)
             "variant": variant, "mode": mode, "value": value,
             "center": g[0], "axes": g[1], "angle": g[2],
             "tilt_deg": pose.tilt_from_H(H, K), "H": H,
+            "inverted": inverted,
         })
     return results

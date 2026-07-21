@@ -121,6 +121,14 @@ fn decode_aligned(
     Some(payload.to_vec())
 }
 
+/// Reed-Solomon work done for a successful decode. Report-only diagnostics:
+/// nothing downstream branches on these.
+#[derive(Clone, Copy, Default)]
+pub struct RsStats {
+    pub erasures: usize,  // codeword bytes erased up front (weak-confidence cells)
+    pub corrected: usize, // codeword bytes whose value RS actually changed
+}
+
 /// Per-codeword-byte reliability = weakest cell confidence inside the byte.
 fn byte_reliability(conf: &[f32], spec: &MarkerSpec) -> Vec<f64> {
     let nbits = spec.data_ring_count() * spec.sector_count;
@@ -142,7 +150,7 @@ fn decode_aligned_ranked(
     spec: &MarkerSpec,
     conf: &[f32],
     conf_erasure: f32,
-) -> Option<Vec<u8>> {
+) -> Option<(Vec<u8>, RsStats)> {
     let nbits = spec.data_ring_count() * spec.sector_count;
     let mut bits = vec![0u8; nbits];
     for (k, ring, sector) in cell_order(spec) {
@@ -162,12 +170,21 @@ fn decode_aligned_ranked(
         .collect();
     erase_pos.sort_unstable();
 
-    let (data, _) = gf256::rs_decode(&code, spec.rs_nsym, &erase_pos).ok()?;
+    let (data, msg) = gf256::rs_decode(&code, spec.rs_nsym, &erase_pos).ok()?;
     let (payload, crc) = (&data[..spec.payload_bytes()], data[spec.payload_bytes()]);
     if gf256::crc8(payload) != crc {
         return None;
     }
-    Some(payload.to_vec())
+    // corrected counts bytes whose value changed vs the codeword as sampled,
+    // so an erased byte that was actually right does not inflate the number
+    let corrected = code.iter().zip(msg.iter()).filter(|(a, b)| a != b).count();
+    Some((
+        payload.to_vec(),
+        RsStats {
+            erasures: erase_pos.len(),
+            corrected,
+        },
+    ))
 }
 
 fn roll_conf(conf: &[f32], spec: &MarkerSpec, shift: usize) -> Vec<f32> {
@@ -182,12 +199,13 @@ fn roll_conf(conf: &[f32], spec: &MarkerSpec, shift: usize) -> Vec<f32> {
 }
 
 /// Ranked-erasure variant of `decode` (mirrors Python's conf_grid path).
+/// The success value carries the RS diagnostics alongside the payload.
 pub fn decode_conf(
     grid: &[u8],
     spec: &MarkerSpec,
     conf: &[f32],
     conf_erasure: f32,
-) -> (Option<Vec<u8>>, usize) {
+) -> (Option<(Vec<u8>, RsStats)>, usize) {
     let shifts: Vec<usize> = if spec.has_sync {
         let (shift, _) = find_rotation(&grid[..spec.sector_count], spec);
         vec![shift]
@@ -197,8 +215,8 @@ pub fn decode_conf(
     for &shift in &shifts {
         let aligned = roll_grid(grid, spec, shift);
         let conf_s = roll_conf(conf, spec, shift);
-        if let Some(pb) = decode_aligned_ranked(&aligned, spec, &conf_s, conf_erasure) {
-            return (Some(pb), shift);
+        if let Some(hit) = decode_aligned_ranked(&aligned, spec, &conf_s, conf_erasure) {
+            return (Some(hit), shift);
         }
     }
     (None, if spec.has_sync { shifts[0] } else { 0 })
