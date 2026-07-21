@@ -1,0 +1,207 @@
+{
+ "simittag_board": 1,
+ "family": "multiscale",
+ "page_mm": [
+  210,
+  297
+ ],
+ "pitch_mm": 27,
+ "diameter_mm": 20,
+ "rows": 4,
+ "cols": 7,
+ "descriptor_raw_hex": "0102010e00c80407",
+ "tags": [
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 0,
+   "x_mm": 0,
+   "y_mm": 0,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 1,
+   "x_mm": 0,
+   "y_mm": 216,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 2,
+   "x_mm": 27,
+   "y_mm": 0,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 3,
+   "x_mm": 27,
+   "y_mm": 216,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 4,
+   "x_mm": 54,
+   "y_mm": 0,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 5,
+   "x_mm": 54,
+   "y_mm": 216,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 6,
+   "x_mm": 81,
+   "y_mm": 0,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 7,
+   "x_mm": 81,
+   "y_mm": 216,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 8,
+   "x_mm": 108,
+   "y_mm": 0,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 9,
+   "x_mm": 108,
+   "y_mm": 216,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 10,
+   "x_mm": 135,
+   "y_mm": 0,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 11,
+   "x_mm": 135,
+   "y_mm": 216,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 12,
+   "x_mm": 162,
+   "y_mm": 0,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 13,
+   "x_mm": 162,
+   "y_mm": 216,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 14,
+   "x_mm": 0,
+   "y_mm": 43.2,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 15,
+   "x_mm": 162,
+   "y_mm": 43.2,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 16,
+   "x_mm": 0,
+   "y_mm": 86.4,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 17,
+   "x_mm": 162,
+   "y_mm": 86.4,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 18,
+   "x_mm": 0,
+   "y_mm": 129.60000000000002,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 19,
+   "x_mm": 162,
+   "y_mm": 129.60000000000002,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 20,
+   "x_mm": 0,
+   "y_mm": 172.8,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "T",
+   "mode": "ID",
+   "value": 21,
+   "x_mm": 162,
+   "y_mm": 172.8,
+   "diameter_mm": 20
+  },
+  {
+   "variant": "M",
+   "mode": "ID",
+   "value": 500,
+   "x_mm": 81,
+   "y_mm": 108,
+   "diameter_mm": 70
+  },
+  {
+   "variant": "D",
+   "mode": "RAW",
+   "value": "0102010e00c80407",
+   "x_mm": -2,
+   "y_mm": 256.5,
+   "diameter_mm": 18
+  }
+ ]
+}
