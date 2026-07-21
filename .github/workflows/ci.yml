@@ -16,5 +16,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-      - run: pip install numpy opencv-python-headless
+      - run: pip install numpy opencv-python-headless pytest
       - run: ./check.sh
