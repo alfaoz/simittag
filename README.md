@@ -24,6 +24,7 @@ Table of Contents
     - [WebAssembly](#webassembly)
   - [Payload Modes](#payload-modes)
   - [Pose Estimation](#pose-estimation)
+  - [Calibration](#calibration)
   - [Lens Distortion](#lens-distortion)
 - [Performance](#performance)
 - [Detection Range](#detection-range)
@@ -181,9 +182,37 @@ Median pose accuracy on realistically degraded synthetic frames, variant M, tilt
 
 Pose quality degrades before decoding does. Near the decode floor (tags 22 to 40 px across) the median tilt error grows to about 2 degrees, with a systematic underestimate of up to 3 degrees, because blur rounds the ellipse. If you decode at extreme range, trust the payload more than the tilt.
 
+## Calibration
+
+Metric pose needs camera intrinsics. The Python package solves them from photos of a printed calibration board:
+
+```
+simittag calibrate img1.png img2.png ... --out intrinsics.json
+```
+
+Print a calibration sheet from the [studio](https://simittag.simitrobotics.com), then photograph it from varied positions and tilts. The solver needs at least 4 usable views with at least 6 board tags visible in each; more views and steeper variety improve the result. Boards are self-describing: each sheet carries a descriptor tag encoding the layout, so the calibrator configures itself from the photos alone. If you kept the studio's JSON sidecar, pass it with `--board`; it is the preferred source of truth and adds one more point per view.
+
+The command reports fx, fy, cx, cy, the OpenCV distortion vector, and the reprojection RMS, and writes them to a JSON file. Feed it back into detection:
+
+```
+simittag decode photo.png --intrinsics intrinsics.json
+```
+
+or in Python:
+
+```python
+from simittag.calibrate import CameraIntrinsics
+intr = CameraIntrinsics.load("intrinsics.json")
+detect.detect(gray, K=intr.K, dist=intr.dist_array)
+```
+
+The intrinsics contract mirrors AprilTag's `apriltag_detection_info_t` (fx, fy, cx, cy in pixels) plus the OpenCV distortion vector, so values from any standard OpenCV calibration are interchangeable with ours.
+
+Calibration is Python-only by design. The Rust detector and the WebAssembly build consume K and dist but do not produce them; the ROS 2 node takes both from CameraInfo, where the standard ROS calibration tooling applies.
+
 ## Lens Distortion
 
-The pose math assumes a pinhole camera. Under radial distortion an off-center circle does not project to an ellipse, and the pose becomes biased. The effect is worst with wide lenses and tags near the edge of the frame. Pass your distortion coefficients to correct for it:
+The pose math assumes a pinhole camera. Under radial distortion an off-center circle does not project to an ellipse, and the pose becomes biased. The effect is worst with wide lenses and tags near the edge of the frame. Pass your distortion coefficients (from [Calibration](#calibration) above, or any OpenCV calibration) to correct for it:
 
 ```python
 detect.detect(gray, DEFAULT, K=K, dist=(k1, k2, p1, p2, k3))
