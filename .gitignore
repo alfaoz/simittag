@@ -4,6 +4,10 @@ __pycache__/
 .claude/
 rust/target/
 rust/dist/
+ros/target/
+/build/
+/install/
+/log/
 dist/
 marker.png
 docs/make_readme_images.py

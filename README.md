@@ -95,7 +95,7 @@ This builds the `simittag` command-line tool at `rust/target/release/simittag`.
 
 For the WebAssembly build, see [WebAssembly](#webassembly) below.
 
-For ROS 2 (Jazzy), use [simittag-ros](https://github.com/alfaoz/simittag-ros): image and CameraInfo in, `vision_msgs/Detection3DArray` with metric poses and fitted covariance plus TF out.
+For ROS 2 (Jazzy), use the [`ros/`](ros/) package in this repository: image and CameraInfo in, `vision_msgs/Detection3DArray` with metric poses and fitted covariance plus TF out. Clone the repository into a colcon workspace and `colcon build --packages-select simittag_ros`.
 
 Usage
 =====

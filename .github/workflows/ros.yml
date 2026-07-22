@@ -1,0 +1,41 @@
+name: ros
+on:
+  push:
+    branches: [main]
+    paths: ["ros/**", "rust/**", "fixtures/**", ".github/workflows/ros.yml"]
+  pull_request:
+    paths: ["ros/**", "rust/**", "fixtures/**", ".github/workflows/ros.yml"]
+
+jobs:
+  build-and-replay:
+    runs-on: ubuntu-latest
+    container: ros:jazzy
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential curl pkg-config clang libclang-dev python3-pil \
+            ros-jazzy-vision-msgs ros-jazzy-tf2-msgs
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --default-toolchain stable --profile minimal
+      - name: colcon build
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          export PATH="$HOME/.cargo/bin:$PATH"
+          colcon build --packages-select simittag_ros --event-handlers console_direct+
+      - name: fixture replay test
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          source install/setup.bash
+          ros2 run simittag_ros simittag_node --ros-args \
+            -p tag_diameter_m:=2.0 -p publish_tf:=false &
+          NODE_PID=$!
+          sleep 3
+          python3 ros/test/replay_fixtures.py --fixtures fixtures --timeout 10
+          RC=$?
+          kill $NODE_PID || true
+          exit $RC

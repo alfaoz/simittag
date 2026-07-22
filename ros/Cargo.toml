@@ -1,0 +1,21 @@
+[package]
+name = "simittag_ros"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-2-Clause"
+description = "ROS 2 node for the simittag circular fiducial detector"
+repository = "https://github.com/alfaoz/simittag-ros"
+
+[[bin]]
+name = "simittag_node"
+path = "src/main.rs"
+
+[dependencies]
+# path dep inside the monorepo so the node always builds against in-tree
+# core; the version keeps a registry fallback for out-of-tree builds
+simittag-core = { path = "../rust/simittag-core", version = "0.1", features = ["parallel"] }
+r2r = "0.9"
+futures = "0.3"
+
+[profile.release]
+lto = "thin"

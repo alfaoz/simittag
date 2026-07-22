@@ -1,0 +1,19 @@
+simittag:
+  ros__parameters:
+    image_topic: /camera/image_raw
+    camera_info_topic: /camera/camera_info
+    detections_topic: /simittag/detections
+    # REQUIRED for metric pose: outer edge of the outer black ring, in
+    # meters, exactly what the studio prints and labels.
+    tag_diameter_m: 0.0
+    # auto | T | M | D  (pinning a variant is faster and refuses the others)
+    variant: auto
+    publish_tf: true
+    # also emit undecoded round candidates (no payload, no TF)
+    pose_only: false
+    # publish /simittag/debug_image with rings and axes drawn
+    debug_image: false
+    # 0 = detect at native resolution; set e.g. 640 to downscale first
+    detect_width: 0
+    # empty = use the incoming image header frame_id
+    frame_id: ""
