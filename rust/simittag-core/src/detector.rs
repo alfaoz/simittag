@@ -1438,7 +1438,11 @@ mod tests {
         let size = 360.0;
         let f = (size / 2.0) / (std::f64::consts::PI / 6.0).tan();
         let k = [[f, 0.0, 179.5], [0.0, f, 179.5], [0.0, 0.0, 1.0]];
-        for &(sp, value) in &[(&spec::T, 42), (&spec::M, 0xabcdef), (&spec::D, 123456789)] {
+        for &(sp, value) in &[
+            (&spec::SIM48C8, 42),
+            (&spec::SIM96C32, 0xabcdef),
+            (&spec::SIM180C88, 123456789),
+        ] {
             for inverted in [false, true] {
                 let image = render_tag(sp, value, inverted);
                 let hits = detect(&image, &k, &[sp], 0.25, None);

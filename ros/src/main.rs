@@ -473,7 +473,8 @@ fn quat_msg(q: &[f64; 4]) -> r2r::geometry_msgs::msg::Quaternion {
     m
 }
 
-/// "T:id:0x2a", "D:geo:48.858370,2.294481,+330", "M:tag:7:0x2a", "D:raw:c0ffee"
+/// "sim48c8:id:0x2a", "sim180c88:geo:48.858370,2.294481,+330",
+/// "sim96c32:tag:7:0x2a", "sim180c88:raw:c0ffee"
 fn format_value(variant: &str, mode: &str, value: &Value) -> String {
     let body = match value {
         Value::Int(v) => format!("id:0x{:x}", v),

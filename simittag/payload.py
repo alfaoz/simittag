@@ -6,14 +6,14 @@ those bytes as: [1 header byte][body], header = (version<<4)|mode.
 
 v1 modes:
   ID     (0): body = big-endian unsigned int, fills the whole body.
-  GEO    (1): D-only. body = u32 (lat+90)*1e7, u32 (lon+180)*1e7, i16 altitude in
+  GEO    (1): sdata-only. body = u32 (lat+90)*1e7, u32 (lon+180)*1e7, i16 altitude in
               METERS -- exactly 10 bytes. ~1 cm angular resolution; 1 m altitude
               resolution covers +-32 km (GPS accuracy is coarser anyway). A GEO tag
               + the free 6-DoF pose = the camera knows its own absolute position
               from one glance at one tag.
   RAW    (3): body = [len:1][bytes], remaining body zero-padded.
   TAGGED (4): body = [namespace:1][big-endian id] -- deployments don't collide
-              (M: 256 namespaces x 65 536 ids; D: 256 x 2^72).
+              (s16m: 256 namespaces x 65 536 ids; sdata: 256 x 2^72).
 
 Mode 2 (was TEXT) is PERMANENTLY reserved-unused: a packed-charset text mode was
 designed and dropped -- RAW covers short text, and the density win didn't justify a
@@ -21,7 +21,7 @@ second text representation. URL was rejected outright: a URL does not fit in 10
 bytes, and hardcoding a shortener domain into a marker spec is how specs die. URL
 use cases are TAGGED + an application-side resolver.
 
-T (USE_HEADER=False) is headerless: the whole payload IS a raw ID, no modes, ever.
+s256 (USE_HEADER=False) is headerless: the whole payload IS a raw ID, no modes, ever.
 """
 from __future__ import annotations
 from .spec import MarkerSpec, DEFAULT
@@ -44,13 +44,13 @@ def _body_bytes(spec):
 
 
 def encode_id(value: int, spec: MarkerSpec = DEFAULT) -> bytes:
-    # USE_HEADER=False (T): pure tracking tag, the whole payload IS the raw ID.
+    # USE_HEADER=False (s256): pure tracking tag, the whole payload IS the raw ID.
     body = _body_bytes(spec)
     if value < 0 or value >= (1 << (8 * body)):
         mx = (1 << (8 * body)) - 1
         raise ValueError(
             f"ID too big for variant {spec.NAME}: max 0x{mx:x} ({mx}). "
-            f"Use M (16.7M IDs) or D for larger values.")
+            f"Use sim96c32/s16m (16.7M IDs) or sim180c88/sdata for larger values.")
     head = _header(MODE_ID) if spec.USE_HEADER else b""
     return head + value.to_bytes(body, "big")
 
@@ -61,7 +61,7 @@ def encode_geo(lat: float, lon: float, alt_m: int = 0,
         raise ValueError(f"variant {spec.NAME} is ID-only (no payload-mode header)")
     if _body_bytes(spec) < 10:
         raise ValueError(f"GEO needs 10 body bytes; variant {spec.NAME} has "
-                         f"{_body_bytes(spec)}. Use D.")
+                         f"{_body_bytes(spec)}. Use sim180c88 (sdata).")
     if not (-90.0 <= lat <= 90.0):
         raise ValueError("lat out of range [-90, 90]")
     if lon == 180.0:                      # one canonical antimeridian
@@ -105,7 +105,7 @@ def decode(payload: bytes, spec: MarkerSpec = DEFAULT):
     GEO value = (lat, lon, alt_m); TAGGED value = (namespace, id)."""
     if len(payload) != spec.payload_bytes:
         raise ValueError("wrong payload length")
-    if not spec.USE_HEADER:                 # T: headerless raw ID
+    if not spec.USE_HEADER:                 # s256: headerless raw ID
         return "ID", int.from_bytes(payload, "big")
     h = payload[0]
     version, mode = h >> 4, h & 0xF
@@ -144,7 +144,7 @@ if __name__ == "__main__":
     print("RAW   ", p.hex(), "->", decode(p, sp))
     p = encode_tagged(12, 0x1F4, sp)
     print("TAGGED", p.hex(), "->", decode(p, sp))
-    D = VARIANTS["D"]
+    D = VARIANTS["sim180c88"]
     cases = [(52.520008, 13.404954, 34), (-33.86882, 151.20930, 58),
              (89.9999999, -179.9999999, -430), (-90.0, -180.0, 32767), (0.0, 0.0, 0)]
     for lat, lon, alt in cases:

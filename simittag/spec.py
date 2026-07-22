@@ -35,7 +35,12 @@ import numpy as np
 @dataclass(frozen=True)
 class MarkerSpec:
     # --- identity ---
-    NAME: str = "M"              # variant label (T/M/D); used by auto-detect
+    # Canonical technical name: sim<total cells incl. sync ring>c<payload bits>.
+    # Used by auto-detect and reported as `variant` in every detection.
+    NAME: str = "sim96c32"
+    # Human alias (s256 / s16m / sdata ...), reported as `alias` alongside the
+    # canonical name and accepted anywhere a variant is selected.
+    ALIAS: str = "s16m"
 
     # --- geometry (normalized radii, outer edge = 1.0) ---
     R_BULLSEYE: float = 0.22
@@ -49,10 +54,10 @@ class MarkerSpec:
 
     # --- rotation lock ---
     # HAS_SYNC=True: ring 0 carries a known sync pattern, rotation found in one shot
-    #   by circular cross-correlation (M, D).
+    #   by circular cross-correlation (all current variants).
     # HAS_SYNC=False: no sync ring -- every ring is data, rotation found by brute
-    #   force over the SECTOR_COUNT shifts with RS+CRC arbitrating (T: tiny grid, so
-    #   the brute force is cheap, and the saved ring buys range/data).
+    #   force over the SECTOR_COUNT shifts with RS+CRC arbitrating (unused since the
+    #   sync-less tracking design was dropped; kept as pinned behavior).
     HAS_SYNC: bool = True
 
     # --- codec ---
@@ -64,10 +69,10 @@ class MarkerSpec:
                                  # see codec.decode)
     CRC_BYTES: int = 1           # of the RS_K data bytes, this many are CRC8
 
-    # payload-mode header: M/D spend 1 byte on a (version<<4)|mode header so one
-    # marker can be ID/GEO/RAW/TAGGED. T is a pure tracking tag (ID only) with one
-    # payload byte, so it skips the header and uses that byte as a raw ID
-    # (256 IDs). See payload.py.
+    # payload-mode header: s16m/sdata spend 1 byte on a (version<<4)|mode header
+    # so one marker can be ID/GEO/RAW/TAGGED. s256 is a pure tracking tag (ID
+    # only) with one payload byte, so it skips the header and uses that byte as
+    # a raw ID (256 IDs). See payload.py.
     USE_HEADER: bool = True
 
     # sync sequence (length must == SECTOR_COUNT when HAS_SYNC). Chosen for low
@@ -129,12 +134,20 @@ class MarkerSpec:
 
 
 # ---------------------------------------------------------------------------
-# Variant family T / M / D
+# Variant family sim48c8 (s256) / sim96c32 (s16m) / sim180c88 (sdata)
 #
 # All three share the SAME radial layout (bullseye, quiet rings, data band, outer
 # ring) and therefore the SAME detection + conic pose. They differ ONLY in the data
-# grid: ring count, sector count, sync, and ECC budget. Fewer/larger cells (T) stay
-# readable smaller and farther -> tracking; more cells (D) carry more bytes -> data.
+# grid: ring count, sector count, sync, and ECC budget. Fewer/larger cells (s256)
+# stay readable smaller and farther -> tracking; more cells (sdata) carry more
+# bytes -> data.
+#
+# Naming: canonical = sim<total cells incl. sync ring>c<payload bits>; alias =
+# a short human name keyed to the ID space (s256 = 256 IDs, s16m = 16.7M IDs,
+# sdata = data payloads). The pre-0.2 letters T/M/D map to s256/s16m/sdata and
+# remain accepted as DEPRECATED input everywhere a variant is selected; they
+# no longer appear in any output. Printed tags carry sync patterns, not names,
+# so the rename does not affect any physical tag.
 #
 # AUTO-DETECT: every variant carries its own sync ring with a distinct, low-sidelobe
 # pattern. The detector tries each candidate variant's grid; a wrong variant samples
@@ -145,44 +158,80 @@ class MarkerSpec:
 # which proved unreliable under perspective).
 # ---------------------------------------------------------------------------
 
-# T -- tracking: 3x16 with sync ring, 32 data cells = 4 bytes. Fewest rings + biggest
-#   cells -> longest range / smallest print. Headerless 1-byte ID = 256 IDs (ample for
-#   tracking a handful of physical tags, like AprilTag families).
+# sim48c8 / s256 -- tracking: 3x16 with sync ring, 32 data cells = 4 bytes. Fewest
+#   rings + biggest cells -> longest range / smallest print. Headerless 1-byte ID =
+#   256 IDs (ample for tracking a handful of physical tags, like AprilTag families).
 #   RS(4,2): 1 payload + 1 CRC8 + 2 parity -> corrects 1 byte error OR 1 erasure.
-#   (Earlier sync-LESS T was dropped: brute-forcing every rotation with only CRC8 is
-#   inherently false-accept-prone -- erasure-fill makes RS always "succeed", leaving
-#   1/256 CRC as the sole gate over hundreds of tries. A sync ring locks rotation in
-#   one shot AND lets the detector reject wrong-variant grids by sync correlation,
-#   which is what makes T/M/D auto-detect robust.)
+#   (Earlier sync-LESS design was dropped: brute-forcing every rotation with only
+#   CRC8 is inherently false-accept-prone -- erasure-fill makes RS always "succeed",
+#   leaving 1/256 CRC as the sole gate over hundreds of tries. A sync ring locks
+#   rotation in one shot AND lets the detector reject wrong-variant grids by sync
+#   correlation, which is what makes the family auto-detect robust.)
 T_SPEC = MarkerSpec(
-    NAME="T", RING_COUNT=3, SECTOR_COUNT=16, HAS_SYNC=True,
+    NAME="sim48c8", ALIAS="s256", RING_COUNT=3, SECTOR_COUNT=16, HAS_SYNC=True,
     RS_K=2, RS_NSYM=2, USE_HEADER=False,
     SYNC=(1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1),
 )
 
-# M -- balanced (default): 4x24, sync ring, 72 cells = 9 bytes.
+# sim96c32 / s16m -- balanced (default): 4x24, sync ring, 72 cells = 9 bytes.
 #   RS(9,5): 4 payload + 1 CRC8 + 4 parity -> corrects 2 byte errors OR 3 erasures.
-M_SPEC = MarkerSpec(NAME="M")  # the canonical defaults above
+M_SPEC = MarkerSpec()  # the canonical defaults above
 
-# D -- data: 5x36, sync ring, 144 cells = 18 bytes.
+# sim180c88 / sdata -- data: 5x36, sync ring, 144 cells = 18 bytes.
 #   RS(18,12): 11 payload + 1 CRC8 + 6 parity -> corrects 3 byte errors OR 5 erasures.
 D_SPEC = MarkerSpec(
-    NAME="D", RING_COUNT=5, SECTOR_COUNT=36, HAS_SYNC=True,
+    NAME="sim180c88", ALIAS="sdata", RING_COUNT=5, SECTOR_COUNT=36, HAS_SYNC=True,
     RS_K=12, RS_NSYM=6,
     SYNC=(1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0,
           1, 1, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0),
 )
 
-VARIANTS = {s.NAME: s for s in (T_SPEC, M_SPEC, D_SPEC)}
+# Deprecated pre-0.2 letters, still accepted as input (never emitted).
+LEGACY_NAMES = {"T": "sim48c8", "M": "sim96c32", "D": "sim180c88"}
+
+
+def normalize_variant(name: str) -> str:
+    """Canonical spec key for any accepted spelling: the canonical name, the
+    human alias, or a deprecated T/M/D letter. Raises KeyError on unknown."""
+    if isinstance(name, str):
+        if dict.__contains__(VARIANTS, name):
+            return name
+        if name in ALIASES:
+            return ALIASES[name]
+        if name in LEGACY_NAMES:
+            return LEGACY_NAMES[name]
+    accepted = [n for sp in VARIANTS.values() for n in (sp.NAME, sp.ALIAS)]
+    raise KeyError(f"unknown variant {name!r}; accepted: {', '.join(accepted)} "
+                   f"(and deprecated {'/'.join(LEGACY_NAMES)})")
+
+
+class _VariantMap(dict):
+    """Canonical-name -> MarkerSpec. Lookup also accepts aliases and the
+    deprecated T/M/D letters so pre-rename callers keep working."""
+    def __missing__(self, key):
+        return dict.__getitem__(self, normalize_variant(key))
+
+    def __contains__(self, key):
+        try:
+            normalize_variant(key)
+            return True
+        except KeyError:
+            return False
+
+
+VARIANTS = _VariantMap({s.NAME: s for s in (T_SPEC, M_SPEC, D_SPEC)})
+ALIASES = {s.ALIAS: s.NAME for s in VARIANTS.values()}
+ALIAS_OF = {s.NAME: s.ALIAS for s in VARIANTS.values()}
 
 DEFAULT = M_SPEC
 
 
 def resolve_specs(versions=None):
     """
-    versions=None      -> all variants (auto-detect among T/M/D).
-    versions="M" or ["M","D"] -> only those (faster, no ambiguity).
-    Returns a list of MarkerSpec in T,M,D order.
+    versions=None -> all variants (auto-detect).
+    versions="s16m" or ["sim96c32","sdata"] -> only those (faster, no
+    ambiguity). Canonical names, aliases, and the deprecated T/M/D letters are
+    all accepted. Returns a list of MarkerSpec in auto-detect order.
     """
     if versions is None:
         names = list(VARIANTS)
@@ -190,7 +239,14 @@ def resolve_specs(versions=None):
         names = [versions]
     else:
         names = list(versions)
-    return [VARIANTS[n] for n in VARIANTS if n in names] or [DEFAULT]
+    normalized = set()
+    for n in names:
+        try:
+            normalized.add(normalize_variant(n))
+        except KeyError:
+            continue  # unknown names fall through to the DEFAULT fallback
+    return [dict.__getitem__(VARIANTS, n) for n in VARIANTS
+            if n in normalized] or [DEFAULT]
 
 
 def autocorr_sidelobe(seq) -> int:
@@ -202,15 +258,22 @@ def autocorr_sidelobe(seq) -> int:
 
 if __name__ == "__main__":
     print("Simittag variant family:")
-    print(f"  {'var':>3} {'grid':>6} {'sync':>5} {'cells':>5} {'RS':>7} "
-          f"{'payload':>7} {'IDs':>12}  corrects")
+    print(f"  {'variant':>10} {'alias':>6} {'grid':>6} {'sync':>5} {'cells':>5} "
+          f"{'RS':>9} {'payload':>7} {'IDs':>12}  corrects")
     for name, sp in VARIANTS.items():
         cells = sp.data_ring_count * sp.SECTOR_COUNT
         id_bytes = sp.payload_bytes - (1 if sp.USE_HEADER else 0)  # ID-mode body
         ids = 1 << (8 * id_bytes)
         sl = f"sl{autocorr_sidelobe(sp.SYNC)}" if sp.HAS_SYNC else "none"
-        print(f"  {name:>3} {f'{sp.RING_COUNT}x{sp.SECTOR_COUNT}':>6} {sl:>5} "
-              f"{cells:>5} {f'RS({sp.RS_K+sp.RS_NSYM},{sp.RS_K})':>7} "
+        print(f"  {name:>10} {sp.ALIAS:>6} {f'{sp.RING_COUNT}x{sp.SECTOR_COUNT}':>6} "
+              f"{sl:>5} {cells:>5} {f'RS({sp.RS_K+sp.RS_NSYM},{sp.RS_K})':>9} "
               f"{f'{sp.payload_bytes}B':>7} {ids:>12,}  "
               f"{sp.RS_NSYM//2} err / {sp.RS_NSYM-1} eras")
+    # sanity: every accepted spelling resolves, deprecated letters map
+    for legacy, canon in LEGACY_NAMES.items():
+        assert VARIANTS[legacy].NAME == canon
+        assert normalize_variant(VARIANTS[canon].ALIAS) == canon
+    assert resolve_specs("s256")[0] is T_SPEC
+    assert resolve_specs(["M", "sdata"]) == [M_SPEC, D_SPEC]
     print("\n  every variant has a sync ring -> auto-detect by sync-gated decode")
+    print("  aliases + deprecated T/M/D letters accepted as input everywhere")

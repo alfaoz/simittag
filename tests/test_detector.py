@@ -74,16 +74,17 @@ class DetectorRegressionTests(unittest.TestCase):
                 decoded = sorted((r["variant"], r["mode"], r["value"])
                                  for r in results)
                 self.assertEqual(decoded, [
-                    ("M", "ID", 170), ("M", "ID", 187),
-                    ("M", "ID", 204), ("M", "ID", 221),
+                    ("sim96c32", "ID", 170), ("sim96c32", "ID", 187),
+                    ("sim96c32", "ID", 204), ("sim96c32", "ID", 221),
                 ])
+                self.assertTrue(all(r["alias"] == "s16m" for r in results))
                 self.assertTrue(all(r["inverted"] == inverted for r in results))
 
     def test_inverted_tags_preserve_range_fixtures(self):
         cases = (
-            ("range_T_z11_t25.png", "T", "ID", 42),
-            ("range_M_z8_t25.png", "M", "ID", 0xABCDEF),
-            ("range_D_z7_t00.png", "D", "GEO",
+            ("range_T_z11_t25.png", "sim48c8", "ID", 42),
+            ("range_M_z8_t25.png", "sim96c32", "ID", 0xABCDEF),
+            ("range_D_z7_t00.png", "sim180c88", "GEO",
              (48.85837000000001, 2.2944809999999904, 330)),
         )
         for filename, variant, mode, value in cases:
@@ -131,9 +132,10 @@ class DetectorRegressionTests(unittest.TestCase):
                 image = base.copy()
                 image[along < -0.65] = 255
                 image = cv2.GaussianBlur(image, (0, 0), 0.7)
+                # versions="M" exercises the deprecated-letter input mapping
                 decoded = [(r["variant"], r["mode"], r["value"])
                            for r in detect.detect(image, versions="M")]
-                self.assertEqual(decoded, [("M", "ID", value)])
+                self.assertEqual(decoded, [("sim96c32", "ID", value)])
 
     def test_radial_clutter_does_not_decode(self):
         for frame_index, image in _radial_clutter_frames():
@@ -160,7 +162,8 @@ class DetectorRegressionTests(unittest.TestCase):
             for inverted in (False, True):
                 with self.subTest(inverted=inverted):
                     marker = Path(directory) / f"tag-{inverted}.png"
-                    command = [sys.executable, "app.py", "encode", "--variant", "T",
+                    command = [sys.executable, "app.py", "encode",
+                               "--variant", "s256",  # alias input accepted
                                "--id", "0x2a", "--size", "256", "--out", str(marker)]
                     if inverted:
                         command.append("--inverted")
@@ -170,7 +173,7 @@ class DetectorRegressionTests(unittest.TestCase):
                     decoded = subprocess.run(
                         [sys.executable, "app.py", "decode", str(marker)],
                         cwd=ROOT, check=True, capture_output=True, text=True)
-                    self.assertIn("T ID=42", decoded.stdout)
+                    self.assertIn("sim48c8 (s256) ID=42", decoded.stdout)
                     polarity = "white-on-black" if inverted else "black-on-white"
                     self.assertIn(polarity, decoded.stdout)
 

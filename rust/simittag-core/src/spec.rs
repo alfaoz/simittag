@@ -6,7 +6,10 @@
 
 #[derive(Debug)]
 pub struct MarkerSpec {
+    /// canonical technical name: sim<total cells incl. sync>c<payload bits>
     pub name: &'static str,
+    /// human alias (s256/s16m/sdata); accepted as input, reported in output
+    pub alias: &'static str,
     // geometry (normalized radii, outer edge = 1.0)
     pub r_bullseye: f64,
     pub r_data_in: f64,
@@ -63,8 +66,9 @@ impl MarkerSpec {
     }
 }
 
-pub static T: MarkerSpec = MarkerSpec {
-    name: "T",
+pub static SIM48C8: MarkerSpec = MarkerSpec {
+    name: "sim48c8",
+    alias: "s256",
     r_bullseye: 0.22,
     r_data_in: 0.30,
     r_data_out: 0.78,
@@ -79,8 +83,9 @@ pub static T: MarkerSpec = MarkerSpec {
     sync: &[1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1],
 };
 
-pub static M: MarkerSpec = MarkerSpec {
-    name: "M",
+pub static SIM96C32: MarkerSpec = MarkerSpec {
+    name: "sim96c32",
+    alias: "s16m",
     r_bullseye: 0.22,
     r_data_in: 0.30,
     r_data_out: 0.78,
@@ -97,8 +102,9 @@ pub static M: MarkerSpec = MarkerSpec {
     ],
 };
 
-pub static D: MarkerSpec = MarkerSpec {
-    name: "D",
+pub static SIM180C88: MarkerSpec = MarkerSpec {
+    name: "sim180c88",
+    alias: "sdata",
     r_bullseye: 0.22,
     r_data_in: 0.30,
     r_data_out: 0.78,
@@ -116,16 +122,18 @@ pub static D: MarkerSpec = MarkerSpec {
     ],
 };
 
-/// T, M, D -- the auto-detect order (matches Python's VARIANTS dict order).
+/// Auto-detect order (matches Python's VARIANTS dict order).
 pub fn variants() -> [&'static MarkerSpec; 3] {
-    [&T, &M, &D]
+    [&SIM48C8, &SIM96C32, &SIM180C88]
 }
 
+/// Resolve any accepted spelling: canonical name, human alias, or the
+/// deprecated pre-0.2 letters T/M/D (input-only; never emitted).
 pub fn by_name(name: &str) -> Option<&'static MarkerSpec> {
     match name {
-        "T" => Some(&T),
-        "M" => Some(&M),
-        "D" => Some(&D),
+        "sim48c8" | "s256" | "T" => Some(&SIM48C8),
+        "sim96c32" | "s16m" | "M" => Some(&SIM96C32),
+        "sim180c88" | "sdata" | "D" => Some(&SIM180C88),
         _ => None,
     }
 }

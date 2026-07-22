@@ -83,6 +83,7 @@ fn parity_spec(path: &str) -> bool {
                 && sp.use_header == f["USE_HEADER"].as_bool().unwrap(),
             || format!("{} flags", sp.name),
         );
+        g.check(sp.alias == f["ALIAS"].as_str().unwrap(), || format!("{} ALIAS", sp.name));
         let sync: Vec<u8> = f["SYNC"].as_array().unwrap().iter()
             .map(|v| v.as_i64().unwrap() as u8).collect();
         g.check(sync == sp.sync, || format!("{} SYNC", sp.name));
@@ -903,7 +904,11 @@ fn det_to_json(d: &simittag_core::detector::Detection) -> String {
         d.decoded.is_some(), d.inverted
     );
     if let Some((variant, mode, value)) = &d.decoded {
-        s.push_str(&format!(",\"variant\":\"{}\",\"mode\":\"{}\"", variant, mode));
+        let alias = simittag_core::spec::by_name(variant).map(|s| s.alias).unwrap_or("");
+        s.push_str(&format!(
+            ",\"variant\":\"{}\",\"alias\":\"{}\",\"mode\":\"{}\"",
+            variant, alias, mode
+        ));
         match value {
             Value::Int(v) => s.push_str(&format!(",\"value\":{}", v)),
             Value::Bytes(b) => s.push_str(&format!(",\"value_hex\":\"{}\"", bytes_to_hex(b))),
@@ -1046,7 +1051,7 @@ fn main() {
             let specs: Vec<&'static spec::MarkerSpec> = match args.get(3).map(|s| s.as_str()) {
                 Some(name) if name != "auto" => {
                     vec![spec::by_name(name).unwrap_or_else(|| {
-                        eprintln!("unknown variant {name} (use T, M, D or auto)");
+                        eprintln!("unknown variant {name} (use sim48c8/s256, sim96c32/s16m, sim180c88/sdata, a deprecated T/M/D letter, or auto)");
                         exit(2);
                     })]
                 }

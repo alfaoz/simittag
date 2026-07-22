@@ -6,7 +6,9 @@ simittag:
     # REQUIRED for metric pose: outer edge of the outer black ring, in
     # meters, exactly what the studio prints and labels.
     tag_diameter_m: 0.0
-    # auto | T | M | D  (pinning a variant is faster and refuses the others)
+    # auto, a canonical name (sim48c8 | sim96c32 | sim180c88), or an alias
+    # (s256 | s16m | sdata). Pinning a variant is faster and refuses the
+    # others. The pre-0.2 letters T/M/D are still accepted (deprecated).
     variant: auto
     publish_tf: true
     # also emit undecoded round candidates (no payload, no TF)

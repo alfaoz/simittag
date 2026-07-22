@@ -24,14 +24,14 @@ def test_descriptor_roundtrip():
 
 def test_grid_board_geometry():
     b = board_mod.grid_board(30.0, 22.0, 8, 6)
-    assert len(b.tags) == 48 and b.tags[0].variant == "T"
-    assert b.point_for("T", "ID", 0) == (0.0, 0.0)
+    assert len(b.tags) == 48 and b.tags[0].variant == "sim48c8"
+    assert b.point_for("T", "ID", 0) == (0.0, 0.0)      # deprecated letter accepted
     assert b.point_for("T", "ID", 7) == (30.0, 30.0)      # row 1, col 1
     assert b.point_for("T", "ID", 47) == (150.0, 210.0)   # row 7, col 5
     assert b.point_for("T", "ID", 48) is None
     # >256 points auto-switches to variant M
     big = board_mod.grid_board(30.0, 22.0, 17, 17)
-    assert big.tags[0].variant == "M"
+    assert big.tags[0].variant == "sim96c32"
 
 
 def test_multiscale_board_geometry():

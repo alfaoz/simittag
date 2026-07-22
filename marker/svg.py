@@ -154,6 +154,6 @@ def _cut_marks(x, y, w, h, m=2.0):
 if __name__ == "__main__":
     from simittag import payload as _p
     svg = marker_svg(_p.encode_id(0x1234, DEFAULT), DEFAULT, size_mm=40,
-                     label="SIMITTAG-M 0x1234")
+                     label="SIMITTAG-s16m 0x1234")
     open("/tmp/marker.svg", "w").write(svg)
     print("wrote /tmp/marker.svg", len(svg), "bytes")

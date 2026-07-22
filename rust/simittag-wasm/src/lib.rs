@@ -163,7 +163,11 @@ pub fn detect(
             }
         }
         if let Some((variant, mode, value)) = &d.decoded {
-            out.push_str(&format!(",\"variant\":\"{}\",\"mode\":\"{}\"", variant, mode));
+            let alias = spec::by_name(variant).map(|s| s.alias).unwrap_or("");
+            out.push_str(&format!(
+                ",\"variant\":\"{}\",\"alias\":\"{}\",\"mode\":\"{}\"",
+                variant, alias, mode
+            ));
             match value {
                 Value::Int(v) => out.push_str(&format!(",\"value\":{}", v)),
                 Value::Bytes(b) => {

@@ -1,7 +1,7 @@
 //! Payload modes (v1) on top of the RS+CRC codec. Port of simittag/payload.py.
 //!
 //! Header byte = (version<<4)|mode. Modes: ID(0), GEO(1), RAW(3), TAGGED(4);
-//! mode 2 permanently reserved (dropped TEXT). T (use_header=false) is a
+//! mode 2 permanently reserved (dropped TEXT). s256 (use_header=false) is a
 //! headerless raw ID. GEO float math uses the identical IEEE-754 double ops as
 //! Python, so decoded lat/lon compare EXACTLY against the fixtures.
 
@@ -55,7 +55,7 @@ pub fn encode_geo(lat: f64, lon: f64, alt_m: i64, spec: &MarkerSpec) -> Result<V
         return Err(format!("variant {} is ID-only", spec.name));
     }
     if body_bytes(spec) < 10 {
-        return Err(format!("GEO needs 10 body bytes; use D, not {}", spec.name));
+        return Err(format!("GEO needs 10 body bytes; use sim180c88, not {}", spec.name));
     }
     if !(-90.0..=90.0).contains(&lat) {
         return Err("lat out of range [-90, 90]".into());
@@ -175,8 +175,8 @@ mod tests {
 
     #[test]
     fn geo_roundtrip_exact() {
-        let p = encode_geo(48.858370, 2.294481, 330, &spec::D).unwrap();
-        match decode(&p, &spec::D).unwrap() {
+        let p = encode_geo(48.858370, 2.294481, 330, &spec::SIM180C88).unwrap();
+        match decode(&p, &spec::SIM180C88).unwrap() {
             ("GEO", Value::Geo { lat, lon, alt_m }) => {
                 assert!((lat - 48.858370).abs() < 5.1e-8);
                 assert!((lon - 2.294481).abs() < 5.1e-8);
@@ -188,13 +188,13 @@ mod tests {
 
     #[test]
     fn guards() {
-        assert!(encode_geo(0.0, 0.0, 0, &spec::M).is_err()); // M too small
-        assert!(encode_geo(91.0, 0.0, 0, &spec::D).is_err());
-        assert!(encode_tagged(256, 0, &spec::D).is_err());
-        assert!(encode_tagged(0, 1 << 16, &spec::M).is_err());
-        assert!(encode_raw(&[0], &spec::T).is_err()); // T headerless
-        assert!(decode(&[0x01, 0, 0, 0], &spec::M).is_err()); // GEO needs D
-        assert!(decode(&[0x13, 0, 0, 0], &spec::M).is_err()); // future version
-        assert!(decode(&[0x03, 3, 0, 0], &spec::M).is_err()); // RAW length > capacity
+        assert!(encode_geo(0.0, 0.0, 0, &spec::SIM96C32).is_err()); // sim96c32 too small
+        assert!(encode_geo(91.0, 0.0, 0, &spec::SIM180C88).is_err());
+        assert!(encode_tagged(256, 0, &spec::SIM180C88).is_err());
+        assert!(encode_tagged(0, 1 << 16, &spec::SIM96C32).is_err());
+        assert!(encode_raw(&[0], &spec::SIM48C8).is_err()); // sim48c8 headerless
+        assert!(decode(&[0x01, 0, 0, 0], &spec::SIM96C32).is_err()); // GEO needs sim180c88
+        assert!(decode(&[0x13, 0, 0, 0], &spec::SIM96C32).is_err()); // future version
+        assert!(decode(&[0x03, 3, 0, 0], &spec::SIM96C32).is_err()); // RAW length > capacity
     }
 }

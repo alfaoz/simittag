@@ -7,7 +7,7 @@ Simittag
 
 Simittag is a circular visual fiducial system. Each tag carries a data payload and can be used to estimate the full 6-DoF pose of the camera. This repository contains the Python reference implementation and a Rust port of the detector. The Rust port has no dependencies and also builds to WebAssembly.
 
-Tags come in three variants. We recommend the M variant unless you have a specific reason to choose otherwise.
+Tags come in three variants. We recommend the s16m variant unless you have a specific reason to choose otherwise.
 
 <img src="docs/images/variants.png" alt="The three Simittag variants" width="760">
 
@@ -52,18 +52,20 @@ Choosing a Variant
 ==================
 The three variants share the same ring layout. Detection and pose estimation are identical for all of them. They differ only in the data grid.
 
-| Variant | Grid | Payload | Distinct IDs | Corrects |
-|:-:|:-:|:-:|:-:|:-:|
-| T | 3×16 | 1 byte | 256 | 1 error / 1 erasure |
-| M | 4×24 | 4 bytes | 16.7 M | 2 errors / 3 erasures |
-| D | 5×36 | 11 bytes | 2⁸⁸ | 3 errors / 5 erasures |
+| Variant | Alias | Grid | Payload | Distinct IDs | Corrects |
+|:-:|:-:|:-:|:-:|:-:|:-:|
+| sim48c8 | s256 | 3×16 | 1 byte | 256 | 1 error / 1 erasure |
+| sim96c32 | s16m | 4×24 | 4 bytes | 16.7 M | 2 errors / 3 erasures |
+| sim180c88 | sdata | 5×36 | 11 bytes | 2⁸⁸ | 3 errors / 5 erasures |
+
+Every variant has two interchangeable names: a canonical technical name (`sim<cells>c<payload bits>`) and a short alias. Both are accepted wherever a variant is selected, and detections report both. Earlier releases called these variants T, M, and D; those letters are still accepted as input but are deprecated. Printed tags are unaffected by naming, since tags carry sync patterns, not names.
 
 Some heuristics for choosing:
-1. If you need maximum detection distance, or expect motion blur, use T. Its cells are the largest, so they survive the most degradation.
-2. If an ID is not enough and you need text, namespaces, or coordinates, use D.
-3. Otherwise use M.
+1. If you need maximum detection distance, or expect motion blur, use s256. Its cells are the largest, so they survive the most degradation.
+2. If an ID is not enough and you need text, namespaces, or coordinates, use sdata.
+3. Otherwise use s16m.
 
-One caveat on T: its single payload byte is protected by the weakest code of the three, and near the decode floor a small fraction of reads (under 1% in our measurements) can return a wrong ID. M and D did not produce a single wrong read in the same tests. If a wrong ID is worse for your application than a missed detection, prefer M even at some range cost.
+One caveat on s256: its single payload byte is protected by the weakest code of the three, and near the decode floor a small fraction of reads (under 1% in our measurements) can return a wrong ID. s16m and sdata did not produce a single wrong read in the same tests. If a wrong ID is worse for your application than a missed detection, prefer s16m even at some range cost.
 
 The detector identifies the variant automatically. You can also pin it to a single variant, which is faster.
 
@@ -106,9 +108,11 @@ Usage
 ## Generating Tags
 
 ```
-python -m marker.generate --variant M --id 0x1234 --out tag.png
-python -m marker.generate --variant M --id 0x1234 --inverted --out inverted-tag.png
+python -m marker.generate --variant s16m --id 0x1234 --out tag.png
+python -m marker.generate --variant s16m --id 0x1234 --inverted --out inverted-tag.png
 ```
+
+`--variant` accepts either name form (`s16m` or `sim96c32`).
 
 There is also a small command-line app (`simittag` when the package is installed, `python app.py` from a source checkout):
 
@@ -145,7 +149,7 @@ Decoding works without camera calibration. For a metrically correct pose, pass y
 ./rust/target/release/simittag detect frame.png
 ```
 
-This prints one JSON line per decoded tag, with the payload, the pose, and the recovered ellipse. Two optional arguments pin the variant and set the assumed horizontal field of view: `simittag detect frame.png M 78`. Decoding is robust to the FOV guess; only the pose needs the real value.
+This prints one JSON line per decoded tag, with the payload, the pose, and the recovered ellipse. Two optional arguments pin the variant and set the assumed horizontal field of view: `simittag detect frame.png s16m 78`. Decoding is robust to the FOV guess; only the pose needs the real value.
 
 You can also use the `simittag-core` crate as a library.
 
@@ -161,12 +165,12 @@ The threaded build has unusual requirements. It needs nightly Rust, a rebuilt st
 
 ## Payload Modes
 
-A T tag holds a single raw byte and nothing else. M and D tags start with a one-byte header that selects a mode:
+An s256 tag holds a single raw byte and nothing else. s16m and sdata tags start with a one-byte header that selects a mode:
 
 * `ID` holds an unsigned integer. This is the default.
 * `RAW` holds opaque bytes or short text.
 * `TAGGED` holds a namespace byte and an ID, so independent deployments do not collide.
-* `GEO` holds latitude, longitude, and altitude. It fits only in a D tag. A GEO tag knows its own position, so one detection tells the camera where it is in the world.
+* `GEO` holds latitude, longitude, and altitude. It fits only in an sdata tag. A GEO tag knows its own position, so one detection tells the camera where it is in the world.
 
 Payloads with an unknown mode decode as verified raw bytes. They are never misparsed. There is deliberately no URL mode.
 
@@ -180,7 +184,7 @@ The camera frame has its origin at the camera center. The z-axis points out of t
 
 An ellipse admits two pose interpretations. This is the circular counterpart of the planar pose ambiguity that square tags have. The detector evaluates both interpretations and picks the one confirmed by the decoded data grid. The two solutions converge as the tag becomes fronto-parallel, so the ambiguity is harmless exactly where it is hardest to distinguish.
 
-Median pose accuracy on realistically degraded synthetic frames, variant M, tilts from 0 to 70 degrees: 0.01 to 0.03 degrees of tilt error, 0.07 degrees of full rotation error, 0.04% depth error, and about 0.6 px of center reprojection error.
+Median pose accuracy on realistically degraded synthetic frames, variant s16m, tilts from 0 to 70 degrees: 0.01 to 0.03 degrees of tilt error, 0.07 degrees of full rotation error, 0.04% depth error, and about 0.6 px of center reprojection error.
 
 Pose quality degrades before decoding does. Near the decode floor (tags 22 to 40 px across) the median tilt error grows to about 2 degrees, with a systematic underestimate of up to 3 degrees, because blur rounds the ellipse. If you decode at extreme range, trust the payload more than the tilt.
 
@@ -241,19 +245,19 @@ Measured with an A4-printed tag (175 mm outer diameter) on a 1080p, 60-degree-HF
 
 | Variant | Range, facing (m) | Range, 25° tilt (m) | Decode floor (px) |
 |---|---:|---:|---:|
-| T | 14 | 13.5 | ~21 |
-| M | 10 | 9.5 | ~29 |
-| D | 8.5 | 8 | ~34 |
+| s256 | 14 | 13.5 | ~21 |
+| s16m | 10 | 9.5 | ~29 |
+| sdata | 8.5 | 8 | ~34 |
 
 The decode floor is the smallest outer-ring diameter, in image pixels, that still decodes. Range scales linearly with print size and with camera resolution.
 
 When a small candidate fails to decode, the detector deconvolves the tag patch (Wiener filter against an assumed Gaussian point-spread) and retries. At long range the limit is not finding the tag, since the outer ring is detected far past the decode floor. The limit is inter-symbol interference: defocus bleeds neighboring data cells into each other. Undoing the blur recovers the bits. The retry runs only after a failed decode on a small candidate, so it adds nothing to healthy frames, and every retry result still has to pass the sync, Reed-Solomon, CRC, and decode-verify gates.
 
-The same retry also covers heavy defocus at mid range. Strong blur defeats decoding long before a tag is small, so candidates up to 160 px are retried, with point-spread widths up to 2.4 px. At a defocus of sigma 2.0 on the A4 test rig this raises the 90%-decode range of M from 2.6 m to 5.0 m and of D from 2.5 m to 3.9 m, with T improving from 6.0 m to 6.9 m.
+The same retry also covers heavy defocus at mid range. Strong blur defeats decoding long before a tag is small, so candidates up to 160 px are retried, with point-spread widths up to 2.4 px. At a defocus of sigma 2.0 on the A4 test rig this raises the 90%-decode range of s16m from 2.6 m to 5.0 m and of sdata from 2.5 m to 3.9 m, with s256 improving from 6.0 m to 6.9 m.
 
-Two more retries follow the same pattern. Under motion blur the point-spread is a line, not a Gaussian. When a failed candidate shows directional smear, measured by structure-tensor coherence, the detector deconvolves a line PSF along the estimated blur axis and retries; this roughly doubles the tolerated smear length (on a 180 px tag, M decodes through 30 px of smear instead of 18, D through 24 instead of 12, T through about 40 instead of 30). Under a hard shadow edge the global black/white reference pair misclassifies the shadowed half of the grid; a final retry rethresholds every cell against an illumination plane fitted to the tag's own quiet rings, which restores decoding under half-plane shadows down to 0.3x brightness. Both retries run only on failures and pass the same accept gates, and the 600-frame clutter measurement above is unchanged with them enabled.
+Two more retries follow the same pattern. Under motion blur the point-spread is a line, not a Gaussian. When a failed candidate shows directional smear, measured by structure-tensor coherence, the detector deconvolves a line PSF along the estimated blur axis and retries; this roughly doubles the tolerated smear length (on a 180 px tag, s16m decodes through 30 px of smear instead of 18, sdata through 24 instead of 12, s256 through about 40 instead of 30). Under a hard shadow edge the global black/white reference pair misclassifies the shadowed half of the grid; a final retry rethresholds every cell against an illumination plane fitted to the tag's own quiet rings, which restores decoding under half-plane shadows down to 0.3x brightness. Both retries run only on failures and pass the same accept gates, and the 600-frame clutter measurement above is unchanged with them enabled.
 
-Occlusion is handled by geometry rather than deconvolution. When an occluder breaks the outer-ring contour, the intact bullseye is fitted as its own candidate and recovers the same projective geometry after scaling by its known radius. Small lone disks, down to a fitted radius of 4 px, are admitted into this fallback only, so normal frames pay nothing for it. Measured with a straight-edge occluder on the A4 rig: a 96 px M tag decodes through 20% occlusion in 56 of 60 trials and through 30% in 44 of 60; at 64 px the rates are 29, 15, 9, and 5 of 60 at 5, 10, 15, and 20% occlusion. On the same frames AprilTag and ArUco stop detecting at 5% occlusion. Below about 55 px the bullseye ellipse is too small to carry the data grid, and occlusion tolerance ends.
+Occlusion is handled by geometry rather than deconvolution. When an occluder breaks the outer-ring contour, the intact bullseye is fitted as its own candidate and recovers the same projective geometry after scaling by its known radius. Small lone disks, down to a fitted radius of 4 px, are admitted into this fallback only, so normal frames pay nothing for it. Measured with a straight-edge occluder on the A4 rig: a 96 px s16m tag decodes through 20% occlusion in 56 of 60 trials and through 30% in 44 of 60; at 64 px the rates are 29, 15, 9, and 5 of 60 at 5, 10, 15, and 20% occlusion. On the same frames AprilTag and ArUco stop detecting at 5% occlusion. Below about 55 px the bullseye ellipse is too small to carry the data grid, and occlusion tolerance ends.
 
 Two accept gates guard the search. A sync-ring correlation gate filters non-tag grids before Reed-Solomon runs. After any successful decode, the observed grid is correlated against the re-encoded decoded pattern (a matched filter of the image against what was decoded) and the result is rejected below 0.73. In calibration, correct decodes scored at least 0.807. Across 600 procedurally generated ring-like clutter frames, CRC-valid wrong-decode candidates scored at most 0.673 and none passed the gate. This leaves a measured empty interval between false and correct candidates while preserving margin for degraded real tags.
 
@@ -261,7 +265,7 @@ Comparison with Other Fiducial Systems
 ======================================
 We did some head-to-head testing against AprilTag (tag36h11, via `pupil-apriltags`, full resolution) and ArUco (6x6, DICT_6X6_250, via OpenCV's `cv2.aruco` with default detector parameters) with identical print size, camera model, poses, and image degradation, at 15 degrees of tilt. Range is the farthest distance with at least 90% decode of an A4-printed tag:
 
-| Camera width | Simittag T | Simittag M | Simittag D | AprilTag 36h11 | ArUco 6x6 |
+| Camera width | Simittag s256 | Simittag s16m | Simittag sdata | AprilTag 36h11 | ArUco 6x6 |
 |---|---:|---:|---:|---:|---:|
 | 1280 px | 9.4 m | 6.7 m | 5.6 m | 9.6 m | 10.0 m |
 | 1920 px | 14.0 m | 10.0 m | 8.5 m | 14.4 m | 15.0 m |

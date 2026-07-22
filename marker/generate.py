@@ -92,9 +92,13 @@ def _parse_payload(s: str, n: int) -> bytes:
 
 
 if __name__ == "__main__":
+    from simittag.spec import ALIASES, LEGACY_NAMES
     ap = argparse.ArgumentParser(description="Render a Simittag marker")
-    ap.add_argument("--variant", default="M", choices=list(VARIANTS),
-                    help="T=tracking 3x16, M=balanced 4x24, D=data 5x36")
+    ap.add_argument("--variant", default="sim96c32", metavar="VARIANT",
+                    choices=(*VARIANTS.keys(), *ALIASES, *LEGACY_NAMES),
+                    help="sim48c8 (s256) = tracking 3x16, sim96c32 (s16m) = "
+                         "balanced 4x24, sim180c88 (sdata) = data 5x36; "
+                         "T/M/D are deprecated aliases")
     ap.add_argument("--id", type=lambda s: int(s, 0), default=None,
                     help="ID-mode integer (e.g. 0x1234); fills the payload")
     ap.add_argument("--payload", default=None,

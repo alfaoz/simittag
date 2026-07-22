@@ -17,7 +17,7 @@ from __future__ import annotations
 import numpy as np
 import cv2
 
-from .spec import resolve_specs
+from .spec import resolve_specs, ALIAS_OF
 from . import codec, payload, pose
 
 # Sync-ring gate: a decode attempt must correlate at least this fraction of
@@ -777,8 +777,8 @@ def _try_decode_spec(gray, Hs, spec, conf_erasure, build=None):
     radial scales, and the sub-cell phase. Returns (decoded, chosen_H) or (None,None).
 
     HAS_SYNC variants gate on the sync ring (CRC8 alone leaks across the search);
-    no-sync variants (T) rely on RS minimum-distance + CRC, which is enough for the
-    tiny grid (brute-force rotation lives in codec.decode).
+    no-sync variants (none currently) rely on RS minimum-distance + CRC
+    (brute-force rotation lives in codec.decode).
     build: grid builder (default _build_grid; _build_grid_plane for the shadow retry).
     """
     if build is None:
@@ -858,9 +858,11 @@ def detect_markers(gray, spec=None, K=None, conf_erasure=0.25, versions=None,
     whether or not they Simittag-decode. Used by the interactive 3D demo (the
     bias-free conic pose is identical for any concentric circle; only DECODE differs).
 
-    versions: None -> auto-detect among T/M/D (each variant's sync ring rejects
-    wrong-variant grids, CRC confirms); a name or list (e.g. "M", ["M","D"]) -> only
-    those (faster). `spec` is a back-compat alias for a single pinned variant.
+    versions: None -> auto-detect across the variant family (each variant's sync
+    ring rejects wrong-variant grids, CRC confirms); a name or list (canonical
+    names, aliases, or deprecated T/M/D letters, e.g. "s16m", ["sim96c32",
+    "sdata"]) -> only those (faster). `spec` is a back-compat alias for a
+    single pinned variant.
 
     pose_only: False -> return ONLY decoded Simittags, dropping the "pose only" boxes
     on undecoded nested-ring candidates. Skips their pose recovery; note the decode
@@ -909,6 +911,7 @@ def detect_markers(gray, spec=None, K=None, conf_erasure=0.25, versions=None,
                    "R": R, "t": t, "tilt_deg": pose.tilt_from_H(chosen_H, K),
                    "decoded": True, "inverted": inverted}
             rec["variant"], (rec["mode"], rec["value"]) = decoded
+            rec["alias"] = ALIAS_OF[rec["variant"]]
             out.append(rec)
             continue
         # At the range floor (marker ~decode-floor px) the discrete decode search is
@@ -1007,6 +1010,7 @@ def detect_markers(gray, spec=None, K=None, conf_erasure=0.25, versions=None,
                "decoded": decoded is not None, "inverted": inverted}
         if decoded:
             rec["variant"], (rec["mode"], rec["value"]) = decoded
+            rec["alias"] = ALIAS_OF[rec["variant"]]
         out.append(rec)
     # de-dup overlapping detections (same physical marker fit at 2 edges/scales):
     # keep the larger-radius one within a center-proximity cluster.
@@ -1056,7 +1060,8 @@ def detect(gray, spec=None, K=None, conf_erasure=0.25, versions=None, dist=None)
             g = outer_geom if outer_geom is not None else geom1
             variant, (mode, value) = decoded
             results.append({
-                "variant": variant, "mode": mode, "value": value,
+                "variant": variant, "alias": ALIAS_OF[variant],
+                "mode": mode, "value": value,
                 "center": g[0], "axes": g[1], "angle": g[2],
                 "tilt_deg": pose.tilt_from_H(H, K), "H": H,
                 "inverted": inverted,
@@ -1121,7 +1126,8 @@ def detect(gray, spec=None, K=None, conf_erasure=0.25, versions=None, dist=None)
         decoded, H, g = hit
         variant, (mode, value) = decoded
         results.append({
-            "variant": variant, "mode": mode, "value": value,
+            "variant": variant, "alias": ALIAS_OF[variant],
+            "mode": mode, "value": value,
             "center": g[0], "axes": g[1], "angle": g[2],
             "tilt_deg": pose.tilt_from_H(H, K), "H": H,
             "inverted": inverted,

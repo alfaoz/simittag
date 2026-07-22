@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import cv2
 
-from simittag.spec import VARIANTS
+from simittag.spec import VARIANTS, ALIASES, LEGACY_NAMES
 from simittag import payload, detect
 from simittag import board as board_mod
 from simittag.calibrate import CameraIntrinsics, calibrate_images
@@ -49,7 +49,7 @@ def cmd_decode(a):
         return
     for r in res:
         polarity = "white-on-black" if r["inverted"] else "black-on-white"
-        print(f"  {r['variant']} {r['mode']}={r['value']}  "
+        print(f"  {r['variant']} ({r['alias']}) {r['mode']}={r['value']}  "
               f"center=({r['center'][0]:.0f},{r['center'][1]:.0f})  "
               f"tilt={r['tilt_deg']:.1f}deg  {polarity}")
 
@@ -67,8 +67,14 @@ def cmd_calibrate(a):
 def main():
     ap = argparse.ArgumentParser(prog="simittag")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    # accepted spellings: canonical (sim96c32), alias (s16m), deprecated (M)
+    variant_names = (*VARIANTS.keys(), *ALIASES, *LEGACY_NAMES)
+    variant_help = ("marker variant: " +
+                    ", ".join(f"{n} ({sp.ALIAS})" for n, sp in VARIANTS.items()) +
+                    "; T/M/D are deprecated aliases")
     e = sub.add_parser("encode")
-    e.add_argument("--variant", choices=VARIANTS, default="M")
+    e.add_argument("--variant", choices=variant_names, default="sim96c32",
+                   metavar="VARIANT", help=variant_help)
     source = e.add_mutually_exclusive_group(required=True)
     source.add_argument("--id", type=lambda s: int(s, 0))
     source.add_argument("--raw")
@@ -78,7 +84,8 @@ def main():
     e.set_defaults(fn=cmd_encode)
     d = sub.add_parser("decode")
     d.add_argument("image")
-    d.add_argument("--variant", choices=("auto", *VARIANTS), default="auto")
+    d.add_argument("--variant", choices=("auto", *variant_names), default="auto",
+                   metavar="VARIANT", help="auto (default) or " + variant_help)
     d.add_argument("--intrinsics", help="intrinsics.json from `calibrate` "
                    "(replaces the default 60-degree-FOV guess)")
     d.set_defaults(fn=cmd_decode)

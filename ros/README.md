@@ -10,7 +10,7 @@ Status: early. Targets ROS 2 Jazzy on Ubuntu 24.04, built on [r2r](https://githu
 Quickstart
 ----------
 
-1. Print a tag from the [studio](https://simittag.simitrobotics.com) (variant M is the default recommendation) and note the printed diameter, or measure the outer edge of the outer black ring.
+1. Print a tag from the [studio](https://simittag.simitrobotics.com) (variant s16m is the default recommendation) and note the printed diameter, or measure the outer edge of the outer black ring.
 2. Build:
 
 ```
@@ -49,7 +49,7 @@ Subscribes:
 Publishes:
 
 - `/simittag/detections` (vision_msgs/Detection3DArray), one message per processed frame, empty when nothing verified. Per detection:
-  - `results[0].hypothesis.class_id`: the payload, e.g. `M:id:0x2a`, `D:geo:48.858370,2.294481,+330`, `M:tag:12:0x1f4`, `D:raw:c0ffee`
+  - `results[0].hypothesis.class_id`: the payload, e.g. `sim96c32:id:0x2a`, `sim180c88:geo:48.858370,2.294481,+330`, `sim96c32:tag:12:0x1f4`, `sim180c88:raw:c0ffee`
   - `results[0].hypothesis.score`: decode-verify correlation (0 to 1)
   - `results[0].pose`: PoseWithCovariance in the camera optical frame, meters. The covariance diagonal is an empirical model fitted on the reference accuracy harness (see `src/covariance.rs`), so the output can be fused (robot_localization and friends) without hand-tuned noise.
 - `/tf` (when `publish_tf`): `<optical frame> -> simittag/<payload>` per detection.
@@ -63,7 +63,7 @@ Parameters
 | name | default | |
 |---|---|---|
 | `tag_diameter_m` | required | outer edge of the outer black ring, meters, as printed |
-| `variant` | `auto` | `T`, `M`, `D`, or `auto`; pinning is faster and refuses other variants |
+| `variant` | `auto` | a canonical name (`sim96c32`), an alias (`s16m`), or `auto`; pinning is faster and refuses other variants. Deprecated `T`/`M`/`D` still accepted |
 | `image_topic` | `/camera/image_raw` | |
 | `camera_info_topic` | `/camera/camera_info` | |
 | `detections_topic` | `/simittag/detections` | |

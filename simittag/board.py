@@ -27,12 +27,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+from .spec import normalize_variant
+
 DESCRIPTOR_VERSION = 1
 FAMILY_GRID = 1
 FAMILY_MULTISCALE = 2
 FAMILY_NAMES = {FAMILY_GRID: "grid", FAMILY_MULTISCALE: "multiscale"}
 
-# multiscale layout constants (frozen, v1): the center anchor is an M tag with
+# multiscale layout constants (frozen, v1): the center anchor is a sim96c32 tag with
 # this id, ANCHOR_RATIO times the perimeter tag diameter; side tags are spaced
 # SIDE_STEP_RATIO times the top/bottom step.
 MULTISCALE_ANCHOR_ID = 500
@@ -43,7 +45,7 @@ SIDE_STEP_RATIO = 1.6
 @dataclass
 class BoardTag:
     """One marker at a known board position (center, mm)."""
-    variant: str          # "T" | "M" | "D"
+    variant: str          # canonical spec name ("sim48c8" | "sim96c32" | "sim180c88")
     mode: str             # "ID" | "RAW"
     value: object         # int for ID, bytes for RAW
     x_mm: float
@@ -62,6 +64,7 @@ class Board:
 
     def point_for(self, variant, mode, value):
         """Board (x, y) for a detection, or None if it is not on this board."""
+        variant = normalize_variant(variant)
         for t in self.tags:
             if t.variant == variant and t.mode == mode and t.value == value:
                 return (t.x_mm, t.y_mm)
@@ -96,7 +99,7 @@ def unpack_descriptor(raw: bytes) -> dict:
 def grid_board(pitch_mm, diameter_mm, rows, cols) -> Board:
     """Uniform rows x cols grid of ID tags, row-major ids from 0.
     Variant T while ids fit in one byte, M beyond."""
-    variant = "T" if rows * cols <= 256 else "M"
+    variant = "sim48c8" if rows * cols <= 256 else "sim96c32"
     b = Board(FAMILY_GRID, pitch_mm, diameter_mm, rows, cols)
     for i in range(rows * cols):
         b.tags.append(BoardTag(variant, "ID", i,
@@ -115,12 +118,12 @@ def multiscale_board(step_mm, diameter_mm, side_rows, top_cols) -> Board:
     h = (side_rows + 1) * sstep
     i = 0
     for c in range(top_cols):                        # top + bottom rows
-        b.tags.append(BoardTag("T", "ID", i, c * step_mm, 0.0, diameter_mm)); i += 1
-        b.tags.append(BoardTag("T", "ID", i, c * step_mm, h, diameter_mm)); i += 1
+        b.tags.append(BoardTag("sim48c8", "ID", i, c * step_mm, 0.0, diameter_mm)); i += 1
+        b.tags.append(BoardTag("sim48c8", "ID", i, c * step_mm, h, diameter_mm)); i += 1
     for r in range(1, side_rows + 1):                # left + right columns
-        b.tags.append(BoardTag("T", "ID", i, 0.0, r * sstep, diameter_mm)); i += 1
-        b.tags.append(BoardTag("T", "ID", i, w, r * sstep, diameter_mm)); i += 1
-    b.tags.append(BoardTag("M", "ID", MULTISCALE_ANCHOR_ID,
+        b.tags.append(BoardTag("sim48c8", "ID", i, 0.0, r * sstep, diameter_mm)); i += 1
+        b.tags.append(BoardTag("sim48c8", "ID", i, w, r * sstep, diameter_mm)); i += 1
+    b.tags.append(BoardTag("sim96c32", "ID", MULTISCALE_ANCHOR_ID,
                            w / 2.0, h / 2.0, diameter_mm * ANCHOR_RATIO))
     return b
 
@@ -143,7 +146,8 @@ def load_board(path) -> Board:
         value = t["value"]
         if t["mode"] == "RAW":
             value = bytes.fromhex(value)
-        b.tags.append(BoardTag(t["variant"], t["mode"], value,
+        # sidecars written before the rename carry T/M/D; normalize on load
+        b.tags.append(BoardTag(normalize_variant(t["variant"]), t["mode"], value,
                                t["x_mm"], t["y_mm"], t["diameter_mm"]))
     return b
 
@@ -151,7 +155,7 @@ def load_board(path) -> Board:
 def find_board(detections) -> Board | None:
     """Reconstruct the board from a descriptor tag among detections, if any."""
     for r in detections:
-        if r["variant"] == "D" and r["mode"] == "RAW":
+        if r["variant"] == "sim180c88" and r["mode"] == "RAW":
             try:
                 return board_from_descriptor(bytes(r["value"]))
             except ValueError:
