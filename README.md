@@ -226,7 +226,7 @@ Timings for a 1280x1280 frame containing six tags, variant auto-detection on, me
 
 | Detector | Time |
 |---|---:|
-| Rust native (rayon) | ~9 ms |
+| Rust native (rayon) | ~6 ms |
 | WASM, threaded (8 workers) | ~15 ms |
 | WASM, single-thread + SIMD | ~35 ms |
 | Python reference (OpenCV, 14 threads) | ~65 ms |
@@ -247,6 +247,8 @@ The decode floor is the smallest outer-ring diameter, in image pixels, that stil
 
 When a small candidate fails to decode, the detector deconvolves the tag patch (Wiener filter against an assumed Gaussian point-spread) and retries. At long range the limit is not finding the tag, since the outer ring is detected far past the decode floor. The limit is inter-symbol interference: defocus bleeds neighboring data cells into each other. Undoing the blur recovers the bits. The retry runs only after a failed decode on a small candidate, so it adds nothing to healthy frames, and every retry result still has to pass the sync, Reed-Solomon, CRC, and decode-verify gates.
 
+Two more retries follow the same pattern. Under motion blur the point-spread is a line, not a Gaussian. When a failed candidate shows directional smear, measured by structure-tensor coherence, the detector deconvolves a line PSF along the estimated blur axis and retries; this roughly doubles the tolerated smear length (on a 180 px tag, M decodes through 30 px of smear instead of 18, D through 24 instead of 12, T through about 40 instead of 30). Under a hard shadow edge the global black/white reference pair misclassifies the shadowed half of the grid; a final retry rethresholds every cell against an illumination plane fitted to the tag's own quiet rings, which restores decoding under half-plane shadows down to 0.3x brightness. Both retries run only on failures and pass the same accept gates, and the 600-frame clutter measurement above is unchanged with them enabled.
+
 Two accept gates guard the search. A sync-ring correlation gate filters non-tag grids before Reed-Solomon runs. After any successful decode, the observed grid is correlated against the re-encoded decoded pattern (a matched filter of the image against what was decoded) and the result is rejected below 0.73. In calibration, correct decodes scored at least 0.807. Across 600 procedurally generated ring-like clutter frames, CRC-valid wrong-decode candidates scored at most 0.673 and none passed the gate. This leaves a measured empty interval between false and correct candidates while preserving margin for degraded real tags.
 
 Comparison with Other Fiducial Systems
@@ -262,9 +264,9 @@ Detection speed on the same machine (Apple M4 Pro, 14 threads), one 1280x1280 fr
 
 | Detector | Time | Relative |
 |---|---:|---:|
-| Simittag (Rust native) | 10.6 ms | 100% |
-| AprilTag (`pupil-apriltags`) | 4.9 ms | 46% |
-| ArUco (OpenCV) | 2.8 ms | 26% |
+| Simittag (Rust native) | 6.3 ms | 100% |
+| AprilTag (`pupil-apriltags`) | 5.3 ms | 84% |
+| ArUco (OpenCV) | 3.0 ms | 47% |
 
 DataMatrix and QR codes store more bytes in the same area, because squares tile and rings do not. They provide no pose.
 
