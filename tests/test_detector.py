@@ -138,26 +138,34 @@ class DetectorRegressionTests(unittest.TestCase):
                 self.assertEqual(decoded, [("sim96c32", "ID", value)])
 
     def test_s64k_deconv_only_fixture(self):
-        # 24px s64k on the A4 rig: decodes ONLY through the Wiener ISI retry.
-        # Pins the deconv path for the nibble codec on the fixture bytes.
-        image = cv2.imread(str(ROOT / "fixtures/frames/isiretry_S64K_z12.png"),
-                           cv2.IMREAD_GRAYSCALE)
-        results = detect.detect(image, versions="s64k")
-        self.assertEqual([(r["variant"], r["value"]) for r in results],
-                         [("sim48c16", 0xBEEF)])
-        old = detect.DECONV_SMALL
-        try:
-            detect.DECONV_SMALL = False
-            self.assertEqual(detect.detect(image, versions="s64k"), [])
-        finally:
-            detect.DECONV_SMALL = old
+        # Floor-region nibble-variant tags that decode ONLY through the
+        # Wiener ISI retry. Pins the deconv path on the fixture bytes.
+        cases = (("isiretry_S64K_z12.png", "s64k", "sim48c16", 0xBEEF),
+                 ("isiretry_S4K_z11.png", "s4k", "sim48c12", 0xABC))
+        for filename, pin, variant, value in cases:
+            with self.subTest(frame=filename):
+                image = cv2.imread(str(ROOT / "fixtures/frames" / filename),
+                                   cv2.IMREAD_GRAYSCALE)
+                results = detect.detect(image, versions=pin)
+                self.assertEqual([(r["variant"], r["value"]) for r in results],
+                                 [(variant, value)])
+                old = detect.DECONV_SMALL
+                try:
+                    detect.DECONV_SMALL = False
+                    self.assertEqual(detect.detect(image, versions=pin), [])
+                finally:
+                    detect.DECONV_SMALL = old
 
     def test_same_grid_variants_cross_reject(self):
         # s256 and s64k share the 3x16 grid; disambiguation rests on sync +
         # codec + verify only. A tag of one pinned to the other's decoder
         # must never decode (the field-safety property for printed tags).
         cases = (("cross_T_as_S64K.png", "s64k"),
-                 ("cross_S64K_as_T.png", "s256"))
+                 ("cross_S64K_as_T.png", "s256"),
+                 ("cross_T_as_S4K.png", "s4k"),
+                 ("cross_S4K_as_T.png", "s256"),
+                 ("cross_S64K_as_S4K.png", "s4k"),
+                 ("cross_S4K_as_S64K.png", "s64k"))
         for filename, wrong_variant in cases:
             with self.subTest(frame=filename):
                 image = cv2.imread(str(ROOT / "fixtures/frames" / filename),

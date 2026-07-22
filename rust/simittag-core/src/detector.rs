@@ -1444,6 +1444,7 @@ mod tests {
             (&spec::SIM96C32, 0xabcdef),
             (&spec::SIM180C88, 123456789),
             (&spec::SIM48C16, 0xbeef),
+            (&spec::SIM48C12, 0xfff),
         ] {
             for inverted in [false, true] {
                 let image = render_tag(sp, value, inverted);

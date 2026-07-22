@@ -172,10 +172,35 @@ pub static SIM48C16: MarkerSpec = MarkerSpec {
     sync: &[0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0],
 };
 
+/// sim48c12 / s4k -- EXPERIMENTAL 12-bit-ID tracking tag at s256-class
+/// range: 3x16 grid, 3 ID nibbles + CRC4 + RS(8,4) parity (2 errors / 3
+/// ranked erasures). The heavier code measured CLEANER than RS(8,5) on
+/// wrong-values (see the Python reference / NOTES R3.6). Same raised
+/// verify floor and jointly-chosen sync as sim48c16.
+pub static SIM48C12: MarkerSpec = MarkerSpec {
+    symbol_bits: 4,
+    max_errors: None,
+    verify_min: Some(0.78),
+    name: "sim48c12",
+    alias: "s4k",
+    r_bullseye: 0.22,
+    r_data_in: 0.30,
+    r_data_out: 0.78,
+    r_ring_in: 0.86,
+    ring_count: 3,
+    sector_count: 16,
+    has_sync: true,
+    use_header: false,
+    rs_k: 4,
+    rs_nsym: 4,
+    crc_bytes: 1,
+    sync: &[1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0],
+};
+
 /// Auto-detect order (matches Python's VARIANTS dict order): v1 variants
 /// first, experimental v2 variants appended.
-pub fn variants() -> [&'static MarkerSpec; 4] {
-    [&SIM48C8, &SIM96C32, &SIM180C88, &SIM48C16]
+pub fn variants() -> [&'static MarkerSpec; 5] {
+    [&SIM48C8, &SIM96C32, &SIM180C88, &SIM48C16, &SIM48C12]
 }
 
 /// Resolve any accepted spelling: canonical name, human alias, or the
@@ -186,6 +211,7 @@ pub fn by_name(name: &str) -> Option<&'static MarkerSpec> {
         "sim96c32" | "s16m" | "M" => Some(&SIM96C32),
         "sim180c88" | "sdata" | "D" => Some(&SIM180C88),
         "sim48c16" | "s64k" => Some(&SIM48C16),
+        "sim48c12" | "s4k" => Some(&SIM48C12),
         _ => None,
     }
 }

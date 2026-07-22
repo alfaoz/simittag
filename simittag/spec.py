@@ -227,6 +227,22 @@ S64K_SPEC = MarkerSpec(
     VERIFY_MIN=0.78,
 )
 
+# sim48c12 / s4k -- EXPERIMENTAL 12-bit-ID tracking tag at s256-class range:
+#   the 3x16 grid carrying 8 GF(16) nibbles as 3 ID nibbles + CRC4 + RS(8,4)
+#   parity (corrects 2 symbol errors or 3 ranked erasures). 4,096 IDs with a
+#   HEAVIER code than either sibling: measured px90 22.9 vs s256's 21.9 at
+#   std tilt 15 (deep lab run, ~6k trials), zero wrong-value decodes where
+#   s256 logged 11 -- the extra parity nibble outweighs the stronger blind
+#   correction for false accepts (NOTES R3.6). Sync chosen jointly with the
+#   family for cross-correlation margin; carries the same raised verify
+#   floor as sim48c16.
+S4K_SPEC = MarkerSpec(
+    NAME="sim48c12", ALIAS="s4k", RING_COUNT=3, SECTOR_COUNT=16, HAS_SYNC=True,
+    SYMBOL_BITS=4, RS_K=4, RS_NSYM=4, USE_HEADER=False,
+    SYNC=(1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0),
+    VERIFY_MIN=0.78,
+)
+
 # Deprecated pre-0.2 letters, still accepted as input (never emitted).
 LEGACY_NAMES = {"T": "sim48c8", "M": "sim96c32", "D": "sim180c88"}
 
@@ -262,7 +278,8 @@ class _VariantMap(dict):
 
 # Auto-detect order: v1 variants first (a candidate that decodes as one of
 # them never pays for the specs after it), experimental v2 variants appended.
-VARIANTS = _VariantMap({s.NAME: s for s in (T_SPEC, M_SPEC, D_SPEC, S64K_SPEC)})
+VARIANTS = _VariantMap({s.NAME: s
+                        for s in (T_SPEC, M_SPEC, D_SPEC, S64K_SPEC, S4K_SPEC)})
 ALIASES = {s.ALIAS: s.NAME for s in VARIANTS.values()}
 ALIAS_OF = {s.NAME: s.ALIAS for s in VARIANTS.values()}
 
