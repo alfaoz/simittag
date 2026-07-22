@@ -296,6 +296,19 @@ class _VariantMap(dict):
 # them never pays for the specs after it), experimental v2 variants appended.
 VARIANTS = _VariantMap({s.NAME: s
                         for s in (T_SPEC, M_SPEC, D_SPEC, S64K_SPEC, S4K_SPEC)})
+
+# The DEFAULT auto-detect set carries ONE 3x16 variant plus s16m and sdata.
+# As of run 3 that slot belongs to sim48c12/s4k — the new default tracking
+# tag (16x s256's ID space, the family's strongest code, zero measured wrong
+# IDs) at a measured cost of ~0.6-0.7m range at 0-15 deg tilt and more under
+# heavy blur (NOTES R3.10). sim48c8/s256 and sim48c16/s64k remain fully
+# supported by EXPLICIT selection — pinned alone or in any explicit set;
+# existing printed s256 fleets select it (or calibrate via BOARD_VERSIONS,
+# which pins the printed-board reality independently of this default).
+# Intended usage: at most one 3x16 variant per environment; explicit
+# multi-3x16 sets remain supported (fleet migrations) and measured safe
+# (zero cross-decodes in ~280k adversarial trials, NOTES R3.4/R3.8).
+DEFAULT_VERSIONS = ("sim48c12", "sim96c32", "sim180c88")
 ALIASES = {s.ALIAS: s.NAME for s in VARIANTS.values()}
 ALIAS_OF = {s.NAME: s.ALIAS for s in VARIANTS.values()}
 
@@ -304,13 +317,14 @@ DEFAULT = M_SPEC
 
 def resolve_specs(versions=None):
     """
-    versions=None -> all variants (auto-detect).
+    versions=None -> the DEFAULT auto-detect set (v1 trio; experimental
+    variants are explicit-only, see DEFAULT_VERSIONS).
     versions="s16m" or ["sim96c32","sdata"] -> only those (faster, no
     ambiguity). Canonical names, aliases, and the deprecated T/M/D letters are
     all accepted. Returns a list of MarkerSpec in auto-detect order.
     """
     if versions is None:
-        names = list(VARIANTS)
+        names = list(DEFAULT_VERSIONS)
     elif isinstance(versions, str):
         names = [versions]
     else:

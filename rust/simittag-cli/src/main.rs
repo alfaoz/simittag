@@ -745,7 +745,10 @@ fn parity_detect(fixtures_dir: &str) -> bool {
         });
         let specs: Vec<&'static spec::MarkerSpec> = match &e["versions"] {
             J::String(s) => vec![spec::by_name(s).unwrap()],
-            _ => spec::variants().to_vec(),
+            J::Array(a) => a.iter()
+                .map(|v| spec::by_name(v.as_str().unwrap()).unwrap())
+                .collect(),
+            _ => spec::default_variants().to_vec(),
         };
         let dets = detector::detect_markers(&src, &k, &specs, 0.25, true, dist.as_deref());
         let want = e["detections"].as_array().unwrap();
@@ -1015,7 +1018,7 @@ fn serve() {
             }
             J::Array(a) => a.iter()
                 .filter_map(|v| v.as_str().and_then(spec::by_name)).collect(),
-            _ => spec::variants().to_vec(),
+            _ => spec::default_variants().to_vec(),
         };
         let dist: Option<Vec<f64>> = hdr["dist"].as_array()
             .map(|a| a.iter().map(|v| v.as_f64().unwrap()).collect());
@@ -1078,8 +1081,8 @@ fn main() {
             ];
             let pinned: Option<&str> = args.get(3).map(|s| s.as_str());
             let specs: Vec<&'static spec::MarkerSpec> = match pinned {
-                Some(name) => vec![spec::by_name(name).unwrap()],
-                None => spec::variants().to_vec(),
+                Some(names) => names.split(',').map(|n| spec::by_name(n).unwrap()).collect(),
+                None => spec::default_variants().to_vec(),
             };
             let n = 20;
             let t0 = std::time::Instant::now();
@@ -1112,11 +1115,11 @@ fn main() {
             let specs: Vec<&'static spec::MarkerSpec> = match args.get(3).map(|s| s.as_str()) {
                 Some(name) if name != "auto" => {
                     vec![spec::by_name(name).unwrap_or_else(|| {
-                        eprintln!("unknown variant {name} (use sim48c8/s256, sim96c32/s16m, sim180c88/sdata, a deprecated T/M/D letter, or auto)");
+                        eprintln!("unknown variant {name} (canonical name, alias, comma-list, deprecated T/M/D letter, or auto; experimental s64k/s4k are explicit-only)");
                         exit(2);
                     })]
                 }
-                _ => spec::variants().to_vec(),
+                _ => spec::default_variants().to_vec(),
             };
             let dets = detector::detect(&src, &k, &specs, 0.25, None);
             for d in &dets {

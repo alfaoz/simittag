@@ -91,7 +91,8 @@ class DetectorRegressionTests(unittest.TestCase):
             with self.subTest(variant=variant):
                 image = cv2.imread(str(ROOT / "fixtures/frames" / filename),
                                    cv2.IMREAD_GRAYSCALE)
-                results = detect.detect(255 - image)
+                # s256 left the default auto set in run 3; select explicitly
+                results = detect.detect(255 - image, versions=variant)
                 self.assertEqual(len(results), 1)
                 result = results[0]
                 self.assertEqual((result["variant"], result["mode"], result["value"]),
@@ -272,8 +273,11 @@ class DetectorRegressionTests(unittest.TestCase):
                     encoded = subprocess.run(
                         command, cwd=ROOT, check=True, capture_output=True, text=True)
                     self.assertIn("decode=('ID', 42)", encoded.stdout)
+                    # s256 is decoded by explicit selection (not in the
+                    # default auto set since the s4k default swap)
                     decoded = subprocess.run(
-                        [sys.executable, "app.py", "decode", str(marker)],
+                        [sys.executable, "app.py", "decode", str(marker),
+                         "--variant", "s256"],
                         cwd=ROOT, check=True, capture_output=True, text=True)
                     self.assertIn("sim48c8 (s256) ID=42", decoded.stdout)
                     polarity = "white-on-black" if inverted else "black-on-white"

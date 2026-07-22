@@ -70,12 +70,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let specs: Vec<&'static MarkerSpec> = match variant.as_str() {
-        "auto" | "" => spec::variants().to_vec(),
+        "auto" | "" => spec::default_variants().to_vec(),
         name => match spec::by_name(name) {
             Some(s) => vec![s],
             None => {
                 r2r::log_error!(&logger, "unknown variant '{}', using auto", name);
-                spec::variants().to_vec()
+                spec::default_variants().to_vec()
             }
         },
     };

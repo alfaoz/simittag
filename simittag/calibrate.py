@@ -23,6 +23,14 @@ import numpy as np
 import cv2
 
 from . import detect as _detect
+from .spec import normalize_variant
+
+# Printed calibration boards are physical artifacts: every sheet in the field
+# carries s256 grid tags (+ an s16m anchor on multiscale sheets) and an sdata
+# descriptor. Calibration therefore pins ITS OWN variant set rather than
+# following the detector's default auto set — otherwise a default-set change
+# would silently break existing boards. A provided board narrows the set.
+BOARD_VERSIONS = ("sim48c8", "sim96c32", "sim180c88")
 from . import board as _board
 
 MIN_POINTS_PER_VIEW = 6
@@ -85,6 +93,14 @@ def calibrate(images, board=None, versions=None) -> CameraIntrinsics:
     images of a simittag calibration board. If `board` is None it is
     reconstructed from the descriptor tag found on the sheet.
     """
+    if versions is not None:
+        view_versions = versions
+    elif board is not None:
+        # narrow to the board's own variants (+ sdata for the descriptor tag)
+        view_versions = sorted({normalize_variant(t.variant)
+                                for t in board.tags} | {"sim180c88"})
+    else:
+        view_versions = list(BOARD_VERSIONS)
     obj_pts, img_pts = [], []
     size = None
     for gray in images:
@@ -92,7 +108,7 @@ def calibrate(images, board=None, versions=None) -> CameraIntrinsics:
             size = (gray.shape[1], gray.shape[0])
         elif size != (gray.shape[1], gray.shape[0]):
             raise ValueError("all calibration images must share one resolution")
-        dets = _detect.detect(gray, versions=versions)
+        dets = _detect.detect(gray, versions=view_versions)
         if board is None:
             board = _board.find_board(dets)
         if board is None:

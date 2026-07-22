@@ -7,7 +7,7 @@ Simittag
 
 Simittag is a circular visual fiducial system. Each tag carries a data payload and can be used to estimate the full 6-DoF pose of the camera. This repository contains the Python reference implementation and a Rust port of the detector. The Rust port has no dependencies and also builds to WebAssembly.
 
-Tags come in three variants. We recommend the s16m variant unless you have a specific reason to choose otherwise.
+Tags come in three default variants. We recommend the s16m variant unless you have a specific reason to choose otherwise.
 
 <img src="docs/images/variants.png" alt="The three Simittag variants" width="760">
 
@@ -54,22 +54,22 @@ The three variants share the same ring layout. Detection and pose estimation are
 
 | Variant | Alias | Grid | Payload | Distinct IDs | Corrects |
 |:-:|:-:|:-:|:-:|:-:|:-:|
-| sim48c8 | s256 | 3×16 | 1 byte | 256 | 1 error / 1 erasure |
+| sim48c12 | s4k | 3×16 | 12-bit ID | 4,096 | 2 errors / 3 erasures |
 | sim96c32 | s16m | 4×24 | 4 bytes | 16.7 M | 2 errors / 3 erasures |
 | sim180c88 | sdata | 5×36 | 11 bytes | 2⁸⁸ | 3 errors / 5 erasures |
 
-There are also two experimental variants on the s256 grid: `sim48c16` (`s64k`, 65,536 IDs) and `sim48c12` (`s4k`, 4,096 IDs with the strongest error correction of the family), both at near-s256 range. See [the experimental section](#experimental-the-s64k-and-s4k-variants) under Detection Range.
+Two more tracking variants share s4k's 3×16 grid and are selected explicitly rather than by default: `sim48c8` (`s256`), the original tracking tag — 256 IDs and about half a meter more range than s4k, with a weaker code (see the caveat below) — and the experimental `sim48c16` (`s64k`) with 65,536 IDs. Deploy at most one 3×16 variant per environment and configure the detector accordingly; the detector accepts any explicit combination (for fleet migrations), and cross-reading between them measured zero in about 280,000 adversarial trials.
 
 Every variant has two interchangeable names: a canonical technical name (`sim<cells>c<payload bits>`) and a short alias. Both are accepted wherever a variant is selected, and detections report both. Earlier releases called these variants T, M, and D; those letters are still accepted as input but are deprecated. Printed tags are unaffected by naming, since tags carry sync patterns, not names.
 
 Some heuristics for choosing:
-1. If you need maximum detection distance, or expect motion blur, use s256. Its cells are the largest, so they survive the most degradation.
+1. If you need maximum detection distance or expect motion blur, use a 3×16 tracking tag: s4k by default, or s256 (selected explicitly) for the last half meter of range if occasional sub-floor wrong IDs are acceptable.
 2. If an ID is not enough and you need text, namespaces, or coordinates, use sdata.
 3. Otherwise use s16m.
 
 One caveat on s256: its single payload byte is protected by the weakest code of the family, and below its reliable decode floor a small fraction of reads can return a wrong ID. In our measurements every wrong read happened on tags smaller than about 20 px, where fewer than three quarters of frames decode at all; there, roughly 0.5% of trials (under 1% of successful decodes) returned a wrong ID, and we measured zero wrong reads at 21 px and above in 3,000 trials. s16m and sdata did not produce a single wrong read anywhere, and the experimental s4k variant offers s256-class range with the strongest code of the family. If a wrong ID is worse for your application than a missed detection, prefer s4k or s16m.
 
-The detector identifies the variant automatically. You can also pin it to a single variant, which is faster.
+The detector identifies the variant automatically among the default set (s4k, s16m, sdata). s256 and s64k are decoded when selected explicitly — pinned alone (faster) or in any explicit set. Pinning to a single variant is always the fastest configuration.
 
 Install
 =======
@@ -234,12 +234,12 @@ Timings for a 1280x1280 frame containing six tags, variant auto-detection on, me
 
 | Detector | Time |
 |---|---:|
-| Rust native (rayon) | ~6 ms |
+| Rust native (rayon) | ~5 ms |
 | WASM, threaded (8 workers) | ~15 ms |
 | WASM, single-thread + SIMD | ~35 ms |
 | Python reference (OpenCV, 14 threads) | ~65 ms |
 
-These timings are for normal black-on-white scenes. White-on-black or mixed-polarity scenes add a second threshold/contour pass; it is triggered from candidate contrast rather than paid on every frame.
+These timings are for the default variant set detecting its own tags (s4k, s16m, sdata; the s4k tags decode on the first spec tried). A detector configured for the legacy s256/s16m/sdata set measures about 6 ms on the equivalent frame. These timings are for normal black-on-white scenes. White-on-black or mixed-polarity scenes add a second threshold/contour pass; it is triggered from candidate contrast rather than paid on every frame.
 
 Detection Range
 ===============
@@ -247,6 +247,7 @@ Measured with an A4-printed tag (175 mm outer diameter) on a 1080p, 60-degree-HF
 
 | Variant | Range, facing (m) | Range, 25° tilt (m) | Decode floor (px) |
 |---|---:|---:|---:|
+| s4k | 12.5 | 12 | ~23 |
 | s256 | 13 | 13.5 | ~22 |
 | s16m | 10 | 9.5 | ~29 |
 | sdata | 8.5 | 8 | ~34 |
@@ -261,20 +262,21 @@ Two more retries follow the same pattern. Under motion blur the point-spread is 
 
 Occlusion is handled by geometry rather than deconvolution. When an occluder breaks the outer-ring contour, the intact bullseye is fitted as its own candidate and recovers the same projective geometry after scaling by its known radius. Small lone disks, down to a fitted radius of 4 px, are admitted into this fallback only, so normal frames pay nothing for it. Measured with a straight-edge occluder on the A4 rig: a 96 px s16m tag decodes through 20% occlusion in 56 of 60 trials and through 30% in 44 of 60; at 64 px the rates are 29, 15, 9, and 5 of 60 at 5, 10, 15, and 20% occlusion. On the same frames AprilTag and ArUco stop detecting at 5% occlusion. Below about 55 px the bullseye ellipse is too small to carry the data grid, and occlusion tolerance ends.
 
-### Experimental: the s64k and s4k variants
+### The 3×16 tracking variants: s4k, s256, and s64k
 
-`sim48c16` (alias `s64k`) and `sim48c12` (alias `s4k`) are experimental variants on s256's 3×16 grid and print geometry: the 32 data cells carry Reed-Solomon nibbles over GF(16) instead of bytes, with a 4-bit CRC. Payloads are headerless IDs.
+Three tracking variants share one 3×16 grid and print geometry. `sim48c12` (`s4k`, the default) and the experimental `sim48c16` (`s64k`) carry Reed-Solomon nibbles over GF(16) with a 4-bit CRC; `sim48c8` (`s256`) is the original byte-code tag.
 
-| Variant | Alias | Grid | Payload | Distinct IDs | Corrects | Range, 15° tilt (m) | Decode floor (px) |
-|:-:|:-:|:-:|:-:|:-:|:-:|---:|---:|
-| sim48c16 | s64k | 3×16 | 16-bit ID | 65,536 | 1 error / 2 erasures | 12 | ~24 |
-| sim48c12 | s4k | 3×16 | 12-bit ID | 4,096 | 2 errors / 3 erasures | 12.5 | ~23 |
+| Variant | Alias | Payload | Distinct IDs | Corrects | Range, 15° tilt (m) | Decode floor (px) | Wrong IDs measured |
+|:-:|:-:|:-:|:-:|:-:|---:|---:|:-:|
+| sim48c12 | s4k | 12-bit ID | 4,096 | 2 errors / 3 erasures | 12.6 | ~23 | 0 in ~17k trials |
+| sim48c8 | s256 | 1 byte | 256 | 1 error | 13.3 | ~22 | ~0.5% of sub-floor trials only |
+| sim48c16 | s64k | 16-bit ID | 65,536 | 1 error / 2 erasures | 12.2 | ~24 | 0 in ~17k trials |
 
-The positioning is ID capacity and code strength at tracking-tag range. s256 offers 256 IDs at 13.3 m on our A4/1080p rig; s64k trades roughly a meter of that for 256× the ID space; s4k sits between them with 4,096 IDs and the strongest error correction of the family. s16m's 16.7 M IDs cost about 2.5 m more (10.0 m). AprilTag 36h11, for comparison, has 587 IDs.
+s4k is the default: 16× s256's ID space, the strongest code of the family, and zero wrong IDs in every condition we measured, for about half a meter of range at small tilts (more under heavy blur, where s256's larger per-symbol cells hold on longer). s256 remains the maximum-range choice, selected explicitly; s64k is the high-capacity option (AprilTag 36h11, for comparison, has 587 IDs) and remains experimental.
 
-Because all three share one grid, telling them apart rests on their synchronization patterns and codecs rather than on geometry. The patterns were chosen jointly for worst-case cross-correlation margin, and both experimental variants carry a raised decode-verify floor (0.78 instead of the global 0.73). We measured the cross-rejection directly: across roughly 280,000 trials of each same-grid variant's tags against the others' decoders — sizes from 16 px to 128 px, both polarities, degradations up to heavy defocus with strong noise — zero cross-decodes. The 600-frame clutter suite also remains at zero false positives with both enabled. In the same measurements neither variant returned a single wrong ID in any condition (about 17,000 trials each across 13 conditions); treat that as provisional while the variants are experimental.
+Because all three share one grid, telling them apart rests on their synchronization patterns and codecs rather than on geometry. The patterns were chosen jointly for worst-case cross-correlation margin, and the nibble variants carry a raised decode-verify floor (0.78 instead of the global 0.73). We measured the cross-rejection directly: across roughly 280,000 trials of each same-grid variant's tags against the others' decoders — sizes from 16 px to 128 px, both polarities, degradations up to heavy defocus with strong noise — zero cross-decodes. The 600-frame clutter suite also remains at zero false positives with all five variants enabled.
 
-Auto-detection includes both. Tags that decode as one of the three v1 variants never pay for them, and the six-tag benchmark frame is unchanged (~6 ms); cluttered failure-path frames pay under 0.2 ms more.
+Deploy at most one 3×16 variant per physical environment and configure the detector to match. The default auto set decodes s4k; a detector pointed at s256 or s64k tags selects them explicitly (`versions="s256"` in Python, `s256` on the CLI, the `variant` parameter in ROS). Explicit multi-variant sets are supported for fleet migrations. Calibration is unaffected by the default: printed calibration boards carry s256 tags, and the calibrator pins the printed-board variant set itself.
 
 Two accept gates guard the search. A sync-ring correlation gate filters non-tag grids before Reed-Solomon runs. After any successful decode, the observed grid is correlated against the re-encoded decoded pattern (a matched filter of the image against what was decoded) and the result is rejected below 0.73. In calibration, correct decodes scored at least 0.807. Across 600 procedurally generated ring-like clutter frames, CRC-valid wrong-decode candidates scored at most 0.673 and none passed the gate. This leaves a measured empty interval between false and correct candidates while preserving margin for degraded real tags.
 
@@ -282,10 +284,10 @@ Comparison with Other Fiducial Systems
 ======================================
 We did some head-to-head testing against AprilTag (tag36h11, via `pupil-apriltags`, full resolution) and ArUco (6x6, DICT_6X6_250, via OpenCV's `cv2.aruco` with default detector parameters) with identical print size, camera model, poses, and image degradation, at 15 degrees of tilt. Range is the farthest distance with at least 90% decode of an A4-printed tag:
 
-| Camera width | Simittag s256 | Simittag s16m | Simittag sdata | AprilTag 36h11 | ArUco 6x6 |
-|---|---:|---:|---:|---:|---:|
-| 1280 px | 8.9 m | 6.7 m | 5.6 m | 9.6 m | 10.0 m |
-| 1920 px | 13.3 m | 10.0 m | 8.5 m | 14.4 m | 15.0 m |
+| Camera width | Simittag s4k | Simittag s256 | Simittag s16m | Simittag sdata | AprilTag 36h11 | ArUco 6x6 |
+|---|---:|---:|---:|---:|---:|---:|
+| 1280 px | 8.4 m | 8.9 m | 6.7 m | 5.6 m | 9.6 m | 10.0 m |
+| 1920 px | 12.6 m | 13.3 m | 10.0 m | 8.5 m | 14.4 m | 15.0 m |
 
 Detection speed on the same machine (Apple M4 Pro, 14 threads), one 1280x1280 frame containing six of each system's own tags at comparable pixel sizes, same degradation, every detector multithreaded and at full resolution:
 

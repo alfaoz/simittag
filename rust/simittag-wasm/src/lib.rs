@@ -107,7 +107,7 @@ pub fn detect(
     };
     let k = [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]];
     let specs: Vec<&'static spec::MarkerSpec> = if versions.is_empty() || versions == "auto" {
-        spec::variants().to_vec()
+        spec::default_variants().to_vec()
     } else {
         versions
             .split(',')
@@ -115,7 +115,7 @@ pub fn detect(
             .collect()
     };
     let specs = if specs.is_empty() {
-        spec::variants().to_vec()
+        spec::default_variants().to_vec()
     } else {
         specs
     };

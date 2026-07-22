@@ -206,10 +206,21 @@ pub static SIM48C12: MarkerSpec = MarkerSpec {
     sync: &[1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0],
 };
 
-/// Auto-detect order (matches Python's VARIANTS dict order): v1 variants
-/// first, experimental v2 variants appended.
+/// Every registered variant, auto-detect order (matches Python's VARIANTS
+/// dict order): v1 variants first, experimental v2 variants appended. This
+/// is the REGISTRY (parity gates, sample patterns) — the default detection
+/// set is default_variants().
 pub fn variants() -> [&'static MarkerSpec; 5] {
     [&SIM48C8, &SIM96C32, &SIM180C88, &SIM48C16, &SIM48C12]
+}
+
+/// The DEFAULT auto-detect set: ONE 3x16 variant + sim96c32 + sim180c88.
+/// The 3x16 slot belongs to sim48c12/s4k (run 3); sim48c8/s256 and
+/// sim48c16/s64k are selected explicitly (printed s256 fleets, migrations).
+/// Mirrors spec.DEFAULT_VERSIONS — see the Python reference for the
+/// measured tradeoffs behind the swap.
+pub fn default_variants() -> [&'static MarkerSpec; 3] {
+    [&SIM48C12, &SIM96C32, &SIM180C88]
 }
 
 /// Resolve any accepted spelling: canonical name, human alias, or the
