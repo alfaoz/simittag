@@ -29,18 +29,19 @@ pub fn find_marker_ellipses(sharp: &Gray) -> Vec<Candidate> {
     let med = median3(&thr);
     let cnts = find_contours(&med);
 
-    let mut ell: Vec<Option<Fitted>> = Vec::with_capacity(cnts.len());
-    for c in &cnts {
+    // Fit + roundness-gate each contour independently. The per-contour
+    // arithmetic is untouched and the indexed collect preserves order, so the
+    // parallel map is bit-identical to the sequential loop (same parity story
+    // as the detector's candidate map).
+    let fit_one = |c: &crate::contours::Contour| -> Option<Fitted> {
         if c.pts.len() < 6 || contour_area(&c.pts) < 25.0 {
-            ell.push(None);
-            continue;
+            return None;
         }
         let g = fit_ellipse(&c.pts);
         let a = g.major / 2.0;
         let b = g.minor / 2.0;
         if a < 1.0 || b < 1.0 {
-            ell.push(None);
-            continue;
+            return None;
         }
         // tilt-invariant roundness: mean |r_norm - 1| in the ellipse's frame
         let th = g.angle_deg.to_radians();
@@ -54,12 +55,18 @@ pub fn find_marker_ellipses(sharp: &Gray) -> Vec<Candidate> {
             acc += ((u * u + v * v).sqrt() - 1.0).abs();
         }
         if acc / c.pts.len() as f64 > 0.03 {
-            ell.push(None);
-            continue;
+            return None;
         }
         let r = g.major.max(g.minor) / 2.0;
-        ell.push(Some(Fitted { geom: g, r }));
-    }
+        Some(Fitted { geom: g, r })
+    };
+    #[cfg(feature = "parallel")]
+    let ell: Vec<Option<Fitted>> = {
+        use rayon::prelude::*;
+        cnts.par_iter().map(fit_one).collect()
+    };
+    #[cfg(not(feature = "parallel"))]
+    let ell: Vec<Option<Fitted>> = cnts.iter().map(fit_one).collect();
 
     // suppress candidates nested under a larger round ancestor (inner ring of an
     // already-kept tag); topological, perspective-invariant

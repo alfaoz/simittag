@@ -37,10 +37,15 @@ pub fn lstsq(a: &[f64], rows: usize, cols: usize, b: &[f64]) -> (Vec<f64>, Vec<f
         let mut rotated = false;
         for p in 0..cols - 1 {
             for q in p + 1..cols {
+                // disjoint column-slice views (p < q) let the compiler drop
+                // bounds checks and vectorize the element-wise rotation; the
+                // reduction order below is unchanged, so results are bitwise
+                // identical to the indexed loop
+                let (ul, ur) = u.split_at_mut(q * rows);
+                let up_col = &mut ul[p * rows..p * rows + rows];
+                let uq_col = &mut ur[..rows];
                 let (mut alpha, mut beta, mut gamma) = (0f64, 0f64, 0f64);
-                for i in 0..rows {
-                    let up = u[p * rows + i];
-                    let uq = u[q * rows + i];
+                for (&up, &uq) in up_col.iter().zip(uq_col.iter()) {
                     alpha += up * up;
                     beta += uq * uq;
                     gamma += up * uq;
@@ -53,17 +58,20 @@ pub fn lstsq(a: &[f64], rows: usize, cols: usize, b: &[f64]) -> (Vec<f64>, Vec<f
                 let t = zeta.signum() / (zeta.abs() + (1.0 + zeta * zeta).sqrt());
                 let c = 1.0 / (1.0 + t * t).sqrt();
                 let s = c * t;
-                for i in 0..rows {
-                    let up = u[p * rows + i];
-                    let uq = u[q * rows + i];
-                    u[p * rows + i] = c * up - s * uq;
-                    u[q * rows + i] = s * up + c * uq;
+                for (up, uq) in up_col.iter_mut().zip(uq_col.iter_mut()) {
+                    let a = *up;
+                    let b = *uq;
+                    *up = c * a - s * b;
+                    *uq = s * a + c * b;
                 }
-                for i in 0..cols {
-                    let vp = v[p * cols + i];
-                    let vq = v[q * cols + i];
-                    v[p * cols + i] = c * vp - s * vq;
-                    v[q * cols + i] = s * vp + c * vq;
+                let (vl, vr) = v.split_at_mut(q * cols);
+                let vp_col = &mut vl[p * cols..p * cols + cols];
+                let vq_col = &mut vr[..cols];
+                for (vp, vq) in vp_col.iter_mut().zip(vq_col.iter_mut()) {
+                    let a = *vp;
+                    let b = *vq;
+                    *vp = c * a - s * b;
+                    *vq = s * a + c * b;
                 }
             }
         }
