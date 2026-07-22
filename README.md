@@ -63,6 +63,8 @@ Some heuristics for choosing:
 2. If an ID is not enough and you need text, namespaces, or coordinates, use D.
 3. Otherwise use M.
 
+One caveat on T: its single payload byte is protected by the weakest code of the three, and near the decode floor a small fraction of reads (under 1% in our measurements) can return a wrong ID. M and D did not produce a single wrong read in the same tests. If a wrong ID is worse for your application than a missed detection, prefer M even at some range cost.
+
 The detector identifies the variant automatically. You can also pin it to a single variant, which is faster.
 
 Install
@@ -239,15 +241,19 @@ Measured with an A4-printed tag (175 mm outer diameter) on a 1080p, 60-degree-HF
 
 | Variant | Range, facing (m) | Range, 25° tilt (m) | Decode floor (px) |
 |---|---:|---:|---:|
-| T | 14 | 12 | ~22 |
-| M | 10 | 9 | ~30 |
-| D | 7 | 7 | ~40 |
+| T | 14 | 13.5 | ~21 |
+| M | 10 | 9.5 | ~29 |
+| D | 8.5 | 8 | ~34 |
 
 The decode floor is the smallest outer-ring diameter, in image pixels, that still decodes. Range scales linearly with print size and with camera resolution.
 
 When a small candidate fails to decode, the detector deconvolves the tag patch (Wiener filter against an assumed Gaussian point-spread) and retries. At long range the limit is not finding the tag, since the outer ring is detected far past the decode floor. The limit is inter-symbol interference: defocus bleeds neighboring data cells into each other. Undoing the blur recovers the bits. The retry runs only after a failed decode on a small candidate, so it adds nothing to healthy frames, and every retry result still has to pass the sync, Reed-Solomon, CRC, and decode-verify gates.
 
+The same retry also covers heavy defocus at mid range. Strong blur defeats decoding long before a tag is small, so candidates up to 160 px are retried, with point-spread widths up to 2.4 px. At a defocus of sigma 2.0 on the A4 test rig this raises the 90%-decode range of M from 2.6 m to 5.0 m and of D from 2.5 m to 3.9 m, with T improving from 6.0 m to 6.9 m.
+
 Two more retries follow the same pattern. Under motion blur the point-spread is a line, not a Gaussian. When a failed candidate shows directional smear, measured by structure-tensor coherence, the detector deconvolves a line PSF along the estimated blur axis and retries; this roughly doubles the tolerated smear length (on a 180 px tag, M decodes through 30 px of smear instead of 18, D through 24 instead of 12, T through about 40 instead of 30). Under a hard shadow edge the global black/white reference pair misclassifies the shadowed half of the grid; a final retry rethresholds every cell against an illumination plane fitted to the tag's own quiet rings, which restores decoding under half-plane shadows down to 0.3x brightness. Both retries run only on failures and pass the same accept gates, and the 600-frame clutter measurement above is unchanged with them enabled.
+
+Occlusion is handled by geometry rather than deconvolution. When an occluder breaks the outer-ring contour, the intact bullseye is fitted as its own candidate and recovers the same projective geometry after scaling by its known radius. Small lone disks, down to a fitted radius of 4 px, are admitted into this fallback only, so normal frames pay nothing for it. Measured with a straight-edge occluder on the A4 rig: a 96 px M tag decodes through 20% occlusion in 56 of 60 trials and through 30% in 44 of 60; at 64 px the rates are 29, 15, 9, and 5 of 60 at 5, 10, 15, and 20% occlusion. On the same frames AprilTag and ArUco stop detecting at 5% occlusion. Below about 55 px the bullseye ellipse is too small to carry the data grid, and occlusion tolerance ends.
 
 Two accept gates guard the search. A sync-ring correlation gate filters non-tag grids before Reed-Solomon runs. After any successful decode, the observed grid is correlated against the re-encoded decoded pattern (a matched filter of the image against what was decoded) and the result is rejected below 0.73. In calibration, correct decodes scored at least 0.807. Across 600 procedurally generated ring-like clutter frames, CRC-valid wrong-decode candidates scored at most 0.673 and none passed the gate. This leaves a measured empty interval between false and correct candidates while preserving margin for degraded real tags.
 
@@ -257,8 +263,8 @@ We did some head-to-head testing against AprilTag (tag36h11, via `pupil-apriltag
 
 | Camera width | Simittag T | Simittag M | Simittag D | AprilTag 36h11 | ArUco 6x6 |
 |---|---:|---:|---:|---:|---:|
-| 1280 px | 8.5 m | 6.5 m | 5.0 m | 9.0 m | 10.0 m |
-| 1920 px | 13.0 m | 10.0 m | 8.0 m | 13.5 m | 15.0 m |
+| 1280 px | 9.4 m | 6.7 m | 5.6 m | 9.6 m | 10.0 m |
+| 1920 px | 14.0 m | 10.0 m | 8.5 m | 14.4 m | 15.0 m |
 
 Detection speed on the same machine (Apple M4 Pro, 14 threads), one 1280x1280 frame containing six of each system's own tags at comparable pixel sizes, same degradation, every detector multithreaded and at full resolution:
 
