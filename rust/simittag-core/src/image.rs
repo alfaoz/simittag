@@ -115,8 +115,9 @@ pub fn gaussian_blur_u8_fixed(src: &Gray, sigma: f64) -> Gray {
             padded[r + x] = row[x] as i32;
         }
         for (t, &kv) in k.iter().enumerate() {
-            for x in 0..w {
-                orow[x] += kv * padded[x + t];
+            let win = &padded[t..t + w];
+            for (o, &p) in orow.iter_mut().zip(win) {
+                *o += kv * p;
             }
         }
     });
@@ -128,8 +129,8 @@ pub fn gaussian_blur_u8_fixed(src: &Gray, sigma: f64) -> Gray {
         for (t, &kv) in k.iter().enumerate() {
             let yy = reflect101(y as i64 + t as i64 - r as i64, h as i64) as usize;
             let srow = &tmp_ref[yy * w..(yy + 1) * w];
-            for x in 0..w {
-                acc[x] += kv * srow[x];
+            for (a, &s) in acc.iter_mut().zip(srow) {
+                *a += kv * s;
             }
         }
         for x in 0..w {
@@ -140,12 +141,18 @@ pub fn gaussian_blur_u8_fixed(src: &Gray, sigma: f64) -> Gray {
 }
 
 /// cv2.addWeighted(a, alpha, b, beta, 0) on u8: f64, round-half-even, saturate.
+/// Row-parallel; each pixel is independent, so this is bit-exact.
 pub fn add_weighted(a: &Gray, alpha: f64, b: &Gray, beta: f64) -> Gray {
     let mut out = Gray::new(a.w, a.h);
-    for i in 0..a.px.len() {
-        let v = a.px[i] as f64 * alpha + b.px[i] as f64 * beta;
-        out.px[i] = v.round_ties_even().clamp(0.0, 255.0) as u8;
-    }
+    let (apx, bpx, w) = (&a.px, &b.px, a.w);
+    for_rows(&mut out.px, w, |y, orow| {
+        let ar = &apx[y * w..y * w + w];
+        let br = &bpx[y * w..y * w + w];
+        for x in 0..w {
+            let v = ar[x] as f64 * alpha + br[x] as f64 * beta;
+            orow[x] = v.round_ties_even().clamp(0.0, 255.0) as u8;
+        }
+    });
     out
 }
 
@@ -176,8 +183,11 @@ pub fn adaptive_threshold_inv(src: &Gray, blk: usize, c_delta: i32) -> Gray {
             padded[r + x] = row[x] as f32;
         }
         for (t, &kv) in k.iter().enumerate() {
-            for x in 0..w {
-                orow[x] += kv * padded[x + t];
+            // window view: bounds checks gone, x loop vectorizes; each output
+            // element still accumulates in the same t order -> bit-exact
+            let win = &padded[t..t + w];
+            for (o, &p) in orow.iter_mut().zip(win) {
+                *o += kv * p;
             }
         }
     });
@@ -188,8 +198,8 @@ pub fn adaptive_threshold_inv(src: &Gray, blk: usize, c_delta: i32) -> Gray {
         for (t, &kv) in k.iter().enumerate() {
             let yy = replicate(y as i64 + t as i64 - r as i64, h as i64) as usize;
             let srow = &tmp_ref[yy * w..(yy + 1) * w];
-            for x in 0..w {
-                acc[x] += kv * srow[x];
+            for (a, &s) in acc.iter_mut().zip(srow) {
+                *a += kv * s;
             }
         }
         let irow = &src.px[y * w..(y + 1) * w];
@@ -231,13 +241,32 @@ pub fn median3(src: &Gray) -> Gray {
             &src.px[y * w..y * w + w],
             &src.px[yp * w..yp * w + w],
         );
-        for x in 0..w {
-            let xm = if x > 0 { x - 1 } else { 0 };
-            let xp = if x + 1 < w { x + 1 } else { w - 1 };
-            orow[x] = med9([
-                r0[xm], r0[x], r0[xp],
-                r1[xm], r1[x], r1[xp],
-                r2[xm], r2[x], r2[xp],
+        // interior via shifted window slices: no bounds checks, and the
+        // branchless min/max network vectorizes on u8 lanes (bit-exact --
+        // med9 is elementwise)
+        if w >= 2 {
+            orow[0] = med9([
+                r0[0], r0[0], r0[1],
+                r1[0], r1[0], r1[1],
+                r2[0], r2[0], r2[1],
+            ]);
+            orow[w - 1] = med9([
+                r0[w - 2], r0[w - 1], r0[w - 1],
+                r1[w - 2], r1[w - 1], r1[w - 1],
+                r2[w - 2], r2[w - 1], r2[w - 1],
+            ]);
+            for (x, o) in orow[1..w - 1].iter_mut().enumerate() {
+                *o = med9([
+                    r0[x], r0[x + 1], r0[x + 2],
+                    r1[x], r1[x + 1], r1[x + 2],
+                    r2[x], r2[x + 1], r2[x + 2],
+                ]);
+            }
+        } else {
+            orow[0] = med9([
+                r0[0], r0[0], r0[0],
+                r1[0], r1[0], r1[0],
+                r2[0], r2[0], r2[0],
             ]);
         }
     });
