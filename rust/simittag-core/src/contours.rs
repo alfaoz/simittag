@@ -30,21 +30,36 @@ const NBR: [(i64, i64); 8] = [
 ];
 
 fn dir_of(from: (i64, i64), to: (i64, i64)) -> usize {
-    let d = (to.0 - from.0, to.1 - from.1);
-    NBR.iter().position(|&n| n == d).unwrap()
+    // lookup by (dx+1, dy+1); entries follow NBR exactly
+    const LUT: [[usize; 3]; 3] = {
+        let mut l = [[usize::MAX; 3]; 3];
+        let mut d = 0;
+        while d < 8 {
+            l[(NBR[d].1 + 1) as usize][(NBR[d].0 + 1) as usize] = d;
+            d += 1;
+        }
+        l
+    };
+    LUT[(to.1 - from.1 + 1) as usize][(to.0 - from.0 + 1) as usize]
 }
 
 pub fn find_contours(binary: &Gray) -> Vec<Contour> {
     let w = binary.w as i64 + 2;
     let h = binary.h as i64 + 2;
-    // label grid, zero-padded; 1 = unvisited foreground
+    // label grid, zero-padded; 1 = unvisited foreground (row-parallel fill)
     let mut f = vec![0i32; (w * h) as usize];
-    for y in 0..binary.h {
-        for x in 0..binary.w {
-            if binary.px[y * binary.w + x] != 0 {
-                f[(y as i64 + 1) as usize * w as usize + (x as i64 + 1) as usize] = 1;
+    {
+        let bw = binary.w;
+        let bpx = &binary.px;
+        crate::image::for_rows(&mut f, w as usize, |y, frow| {
+            if y == 0 || y > binary.h {
+                return;
             }
-        }
+            let brow = &bpx[(y - 1) * bw..y * bw];
+            for (fv, &bv) in frow[1..1 + bw].iter_mut().zip(brow) {
+                *fv = (bv != 0) as i32;
+            }
+        });
     }
     let idx = |x: i64, y: i64| (y * w + x) as usize;
 
@@ -56,9 +71,27 @@ pub fn find_contours(binary: &Gray) -> Vec<Contour> {
 
     for y in 1..h - 1 {
         let mut lnbd: i32 = 1;
-        for x in 1..w - 1 {
-            let fxy = f[idx(x, y)];
+        let row_base = (y * w) as usize;
+        let mut x = 1i64;
+        while x < w - 1 {
+            let fxy = f[row_base + x as usize];
             if fxy == 0 {
+                // zero pixels are no-ops for the whole algorithm (LNBD updates
+                // only on nonzero pixels), so skip zero runs 8 lanes at a time
+                let row = &f[row_base..row_base + w as usize];
+                let mut xs = x as usize + 1;
+                let end = (w - 1) as usize;
+                while xs + 8 <= end {
+                    let c = &row[xs..xs + 8];
+                    if (c[0] | c[1] | c[2] | c[3] | c[4] | c[5] | c[6] | c[7]) != 0 {
+                        break;
+                    }
+                    xs += 8;
+                }
+                while xs < end && row[xs] == 0 {
+                    xs += 1;
+                }
+                x = xs as i64;
                 continue;
             }
             let outer = fxy == 1 && f[idx(x - 1, y)] == 0;
@@ -83,14 +116,24 @@ pub fn find_contours(binary: &Gray) -> Vec<Contour> {
                 let mut pts: Vec<(i32, i32)> = Vec::new();
 
                 // --- border following (Suzuki appendix, 8-connectivity) ---
+                // flat index deltas for the 8 neighbors (exact int arithmetic)
+                let off: [i64; 8] = {
+                    let mut o = [0i64; 8];
+                    let mut d = 0;
+                    while d < 8 {
+                        o[d] = NBR[d].1 * w + NBR[d].0;
+                        d += 1;
+                    }
+                    o
+                };
                 // 3.1: from start_nbr, search CLOCKWISE around (x,y)
                 let d0 = dir_of((x, y), (start_nbr.0 - x + x, start_nbr.1)); // dir to start_nbr
+                let base = y * w + x;
                 let mut found = None;
                 for k in 0..8 {
                     let d = (d0 + 8 - k) % 8; // clockwise
-                    let (dx, dy) = NBR[d];
-                    if f[idx(x + dx, y + dy)] != 0 {
-                        found = Some((x + dx, y + dy));
+                    if f[(base + off[d]) as usize] != 0 {
+                        found = Some((x + NBR[d].0, y + NBR[d].1));
                         break;
                     }
                 }
@@ -108,14 +151,13 @@ pub fn find_contours(binary: &Gray) -> Vec<Contour> {
                             // the element after p2 (counterclockwise), tracking
                             // whether (x+1, y) of p3 was examined and was 0.
                             let dstart = (dir_of(p3, p2) + 1) % 8;
+                            let b3 = p3.1 * w + p3.0;
                             let mut p4 = None;
                             let mut right_zero = false;
                             for k in 0..8 {
                                 let d = (dstart + k) % 8;
-                                let (dx, dy) = NBR[d];
-                                let q = (p3.0 + dx, p3.1 + dy);
-                                if f[idx(q.0, q.1)] != 0 {
-                                    p4 = Some(q);
+                                if f[(b3 + off[d]) as usize] != 0 {
+                                    p4 = Some((p3.0 + NBR[d].0, p3.1 + NBR[d].1));
                                     break;
                                 }
                                 if d == 0 {
@@ -153,6 +195,7 @@ pub fn find_contours(binary: &Gray) -> Vec<Contour> {
             if fxy != 1 {
                 lnbd = fxy.abs();
             }
+            x += 1;
         }
     }
     for i in 0..contours.len() {
