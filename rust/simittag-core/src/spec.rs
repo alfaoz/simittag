@@ -34,6 +34,10 @@ pub struct MarkerSpec {
     /// gate); same-grid variants carry a higher floor -- see the Python
     /// reference (spec.py / NOTES R3.4) for the measured calibration
     pub verify_min: Option<f64>,
+    /// per-variant ranked-erasure confidence threshold (None = the caller's
+    /// conf_erasure; 0.0 disables ranked erasures). For RS(4,2) one erasure
+    /// forfeits the whole blind budget -- see spec.py for the measurement.
+    pub conf_erasure: Option<f32>,
     pub sync: &'static [u8],
 }
 
@@ -85,7 +89,8 @@ impl MarkerSpec {
 pub static SIM48C8: MarkerSpec = MarkerSpec {
     symbol_bits: 8,
     max_errors: None,
-    verify_min: None,
+    verify_min: Some(0.76),
+    conf_erasure: Some(0.0),
     name: "sim48c8",
     alias: "s256",
     r_bullseye: 0.22,
@@ -106,6 +111,7 @@ pub static SIM96C32: MarkerSpec = MarkerSpec {
     symbol_bits: 8,
     max_errors: None,
     verify_min: None,
+    conf_erasure: None,
     name: "sim96c32",
     alias: "s16m",
     r_bullseye: 0.22,
@@ -128,6 +134,7 @@ pub static SIM180C88: MarkerSpec = MarkerSpec {
     symbol_bits: 8,
     max_errors: None,
     verify_min: None,
+    conf_erasure: None,
     name: "sim180c88",
     alias: "sdata",
     r_bullseye: 0.22,
@@ -156,6 +163,7 @@ pub static SIM48C16: MarkerSpec = MarkerSpec {
     symbol_bits: 4,
     max_errors: None,
     verify_min: Some(0.78),
+    conf_erasure: None,
     name: "sim48c16",
     alias: "s64k",
     r_bullseye: 0.22,
@@ -181,6 +189,7 @@ pub static SIM48C12: MarkerSpec = MarkerSpec {
     symbol_bits: 4,
     max_errors: None,
     verify_min: Some(0.78),
+    conf_erasure: None,
     name: "sim48c12",
     alias: "s4k",
     r_bullseye: 0.22,

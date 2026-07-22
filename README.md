@@ -67,7 +67,7 @@ Some heuristics for choosing:
 2. If an ID is not enough and you need text, namespaces, or coordinates, use sdata.
 3. Otherwise use s16m.
 
-One caveat on s256: its single payload byte is protected by the weakest code of the three, and near the decode floor a small fraction of reads (under 1% in our measurements) can return a wrong ID. s16m and sdata did not produce a single wrong read in the same tests. If a wrong ID is worse for your application than a missed detection, prefer s16m even at some range cost.
+One caveat on s256: its single payload byte is protected by the weakest code of the family, and below its reliable decode floor a small fraction of reads can return a wrong ID. In our measurements every wrong read happened on tags smaller than about 20 px, where fewer than three quarters of frames decode at all; there, roughly 0.5% of trials (under 1% of successful decodes) returned a wrong ID, and we measured zero wrong reads at 21 px and above in 3,000 trials. s16m and sdata did not produce a single wrong read anywhere, and the experimental s4k variant offers s256-class range with the strongest code of the family. If a wrong ID is worse for your application than a missed detection, prefer s4k or s16m.
 
 The detector identifies the variant automatically. You can also pin it to a single variant, which is faster.
 
@@ -247,7 +247,7 @@ Measured with an A4-printed tag (175 mm outer diameter) on a 1080p, 60-degree-HF
 
 | Variant | Range, facing (m) | Range, 25° tilt (m) | Decode floor (px) |
 |---|---:|---:|---:|
-| s256 | 13 | 13 | ~22 |
+| s256 | 13 | 13.5 | ~22 |
 | s16m | 10 | 9.5 | ~29 |
 | sdata | 8.5 | 8 | ~34 |
 
@@ -270,7 +270,7 @@ Occlusion is handled by geometry rather than deconvolution. When an occluder bre
 | sim48c16 | s64k | 3×16 | 16-bit ID | 65,536 | 1 error / 2 erasures | 12 | ~24 |
 | sim48c12 | s4k | 3×16 | 12-bit ID | 4,096 | 2 errors / 3 erasures | 12.5 | ~23 |
 
-The positioning is ID capacity and code strength at tracking-tag range. s256 offers 256 IDs at 13.1 m on our A4/1080p rig; s64k trades roughly a meter of that for 256× the ID space; s4k sits between them with 4,096 IDs and the strongest error correction of the family. s16m's 16.7 M IDs cost about 2.5 m more (10.0 m). AprilTag 36h11, for comparison, has 587 IDs.
+The positioning is ID capacity and code strength at tracking-tag range. s256 offers 256 IDs at 13.3 m on our A4/1080p rig; s64k trades roughly a meter of that for 256× the ID space; s4k sits between them with 4,096 IDs and the strongest error correction of the family. s16m's 16.7 M IDs cost about 2.5 m more (10.0 m). AprilTag 36h11, for comparison, has 587 IDs.
 
 Because all three share one grid, telling them apart rests on their synchronization patterns and codecs rather than on geometry. The patterns were chosen jointly for worst-case cross-correlation margin, and both experimental variants carry a raised decode-verify floor (0.78 instead of the global 0.73). We measured the cross-rejection directly: across roughly 280,000 trials of each same-grid variant's tags against the others' decoders — sizes from 16 px to 128 px, both polarities, degradations up to heavy defocus with strong noise — zero cross-decodes. The 600-frame clutter suite also remains at zero false positives with both enabled. In the same measurements neither variant returned a single wrong ID in any condition (about 17,000 trials each across 13 conditions); treat that as provisional while the variants are experimental.
 
@@ -284,8 +284,8 @@ We did some head-to-head testing against AprilTag (tag36h11, via `pupil-apriltag
 
 | Camera width | Simittag s256 | Simittag s16m | Simittag sdata | AprilTag 36h11 | ArUco 6x6 |
 |---|---:|---:|---:|---:|---:|
-| 1280 px | 8.7 m | 6.7 m | 5.6 m | 9.6 m | 10.0 m |
-| 1920 px | 13.1 m | 10.0 m | 8.5 m | 14.4 m | 15.0 m |
+| 1280 px | 8.9 m | 6.7 m | 5.6 m | 9.6 m | 10.0 m |
+| 1920 px | 13.3 m | 10.0 m | 8.5 m | 14.4 m | 15.0 m |
 
 Detection speed on the same machine (Apple M4 Pro, 14 threads), one 1280x1280 frame containing six of each system's own tags at comparable pixel sizes, same degradation, every detector multithreaded and at full resolution:
 

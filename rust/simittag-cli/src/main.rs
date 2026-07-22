@@ -98,6 +98,12 @@ fn parity_spec(path: &str) -> bool {
             _ => false,
         };
         g.check(vmin_ok, || format!("{} VERIFY_MIN", sp.name));
+        let ce_ok = match (&sp.conf_erasure, &f["CONF_ERASURE"]) {
+            (None, J::Null) => true,
+            (Some(v), w) => w.as_f64().map(|x| (x - *v as f64).abs() < 1e-9).unwrap_or(false),
+            _ => false,
+        };
+        g.check(ce_ok, || format!("{} CONF_ERASURE", sp.name));
         let sync: Vec<u8> = f["SYNC"].as_array().unwrap().iter()
             .map(|v| v.as_i64().unwrap() as u8).collect();
         g.check(sync == sp.sync, || format!("{} SYNC", sp.name));

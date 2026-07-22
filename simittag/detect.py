@@ -783,6 +783,9 @@ def _try_decode_spec(gray, Hs, spec, conf_erasure, build=None):
     """
     if build is None:
         build = _build_grid
+    # Per-variant ranked-erasure threshold override (see spec.CONF_ERASURE).
+    if spec.CONF_ERASURE is not None:
+        conf_erasure = spec.CONF_ERASURE
     step = 2 * np.pi / spec.SECTOR_COUNT
     for H in Hs:
         for scale in (1.0, 1.06, 1.12, 0.94):

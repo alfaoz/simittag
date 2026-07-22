@@ -77,6 +77,14 @@ class MarkerSpec:
     # Erasure corrections are never capped by this. Small codes can trade a
     # sliver of recall for a lower wrong-value rate here; see codec.decode.
     MAX_ERRORS: object = None
+    # Per-variant ranked-erasure confidence threshold (None = the detector's
+    # conf_erasure parameter, default 0.25; 0.0 disables ranked erasures).
+    # For RS(4,2) one erasure consumes the ENTIRE blind-correction budget
+    # ((NSYM-erasures)//2 = 0), so erasing the weakest byte FORFEITS fixing
+    # any other byte — measured on paired frames: disabling erasures for
+    # sim48c8 gains +9% floor-band recall and never hurts occlusion (NOTES
+    # R3.9). Unique to NSYM=2; the other variants keep ranked erasures.
+    CONF_ERASURE: object = None
     # Per-variant decode-verify floor (None = the detector's global gate,
     # 0.73). Same-grid variants need a higher floor: the global gate was
     # calibrated against CLUTTER, but a wrong-variant read of a REAL same-grid
@@ -189,10 +197,18 @@ class MarkerSpec:
 #   leaving 1/256 CRC as the sole gate over hundreds of tries. A sync ring locks
 #   rotation in one shot AND lets the detector reject wrong-variant grids by sync
 #   correlation, which is what makes the family auto-detect robust.)
+#   Integrity/recall config (run 3, measured on paired frames — NOTES R3.9):
+#   CONF_ERASURE=0.0 (see field comment) + VERIFY_MIN=0.76. Together they
+#   BEAT the previous config on both axes: +8% decode recall in the floor
+#   band and -19% wrong-ID accepts, with healthy-size recall and occlusion
+#   tolerance unchanged. Wrong IDs remain possible below the reliable floor
+#   (~0.4% of near-floor trials at std degradation, all at <=20px); tracking
+#   users who need zero measured wrongs should prefer sim48c12/s4k.
 T_SPEC = MarkerSpec(
     NAME="sim48c8", ALIAS="s256", RING_COUNT=3, SECTOR_COUNT=16, HAS_SYNC=True,
     RS_K=2, RS_NSYM=2, USE_HEADER=False,
     SYNC=(1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1),
+    CONF_ERASURE=0.0, VERIFY_MIN=0.76,
 )
 
 # sim96c32 / s16m -- balanced (default): 4x24, sync ring, 72 cells = 9 bytes.

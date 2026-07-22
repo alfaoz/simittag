@@ -195,6 +195,50 @@ class DetectorRegressionTests(unittest.TestCase):
         self.assertTrue(any(detect.VERIFY_MIN <= c < 0.78 for c in survivors),
                         f"survivor no longer in the tightened band: {survivors}")
 
+    def test_s256_integrity_config_rejects_wrong_id(self):
+        # A 19px s256 tag (true ID 15) that the pre-run-3 config wrongly
+        # decoded as ID 3 (erasure-path codeword collision below the reliable
+        # floor). The shipped config (CONF_ERASURE=0.0 + VERIFY_MIN=0.76)
+        # must reject it; restoring the old knobs must reproduce the wrong
+        # accept, proving the pin exercises the config (not vacuous).
+        import dataclasses
+        from simittag import spec as specmod
+        image = cv2.imread(str(ROOT / "tests/data/wrongid_T_px19.png"),
+                           cv2.IMREAD_GRAYSCALE)
+        K = detect.default_K(1080, 1080)
+        K[0, 0] = K[1, 1] = (1920 / 2) / np.tan(np.radians(60.0) / 2)
+        self.assertEqual(detect.detect(image, K=K, versions="s256"), [])
+        legacy = dataclasses.replace(specmod.T_SPEC,
+                                     CONF_ERASURE=None, VERIFY_MIN=None)
+        dict.__setitem__(specmod.VARIANTS, "sim48c8", legacy)
+        try:
+            wrong = [r["value"] for r in
+                     detect.detect(image, K=K, versions="s256")]
+        finally:
+            dict.__setitem__(specmod.VARIANTS, "sim48c8", specmod.T_SPEC)
+        self.assertEqual(wrong, [3])
+
+    def test_s256_noeras_recall_fixture(self):
+        # The fixture frame that decodes ONLY under the shipped s256 config:
+        # with ranked erasures re-enabled (legacy), RS(4,2) forfeits its
+        # blind-correction budget and the decode fails.
+        import dataclasses
+        from simittag import spec as specmod
+        image = cv2.imread(str(ROOT / "fixtures/frames/noeras_T_z13.png"),
+                           cv2.IMREAD_GRAYSCALE)
+        K = detect.default_K(1080, 1080)
+        K[0, 0] = K[1, 1] = (1920 / 2) / np.tan(np.radians(60.0) / 2)
+        results = detect.detect(image, K=K, versions="s256")
+        self.assertEqual([(r["variant"], r["value"]) for r in results],
+                         [("sim48c8", 0x2A)])
+        legacy = dataclasses.replace(specmod.T_SPEC,
+                                     CONF_ERASURE=None, VERIFY_MIN=None)
+        dict.__setitem__(specmod.VARIANTS, "sim48c8", legacy)
+        try:
+            self.assertEqual(detect.detect(image, K=K, versions="s256"), [])
+        finally:
+            dict.__setitem__(specmod.VARIANTS, "sim48c8", specmod.T_SPEC)
+
     def test_radial_clutter_does_not_decode(self):
         for frame_index, image in _radial_clutter_frames():
             with self.subTest(frame=frame_index):

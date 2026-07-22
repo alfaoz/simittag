@@ -903,6 +903,8 @@ fn try_decode_spec_with(
     conf_erasure: f32,
     plane: bool, // shadow retry: per-cell illumination-plane thresholds
 ) -> Option<DecodeHit> {
+    // per-variant ranked-erasure threshold override (see spec.conf_erasure)
+    let conf_erasure = spec.conf_erasure.unwrap_or(conf_erasure);
     let step = 2.0 * std::f64::consts::PI / spec.sector_count as f64;
     let (pat, rpat) = patterns_for(spec);
     let sync_min = 0.70 * spec.sector_count as f64;
