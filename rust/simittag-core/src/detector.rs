@@ -532,6 +532,11 @@ const VERIFY_MIN: f64 = 0.73;
 const DECONV_MAX_PX: f64 = 80.0;
 const DECONV_SIGMAS: [f64; 2] = [1.0, 1.6];
 const DECONV_LAMBDA: f64 = 0.01;
+// Motion-blur retry (line-PSF Wiener); see detect.py for the calibration:
+// still tags / clutter measure coherence <=~0.32, motion >=12px smear >=0.39.
+const MOTION_COHERENCE_MIN: f64 = 0.25;
+const MOTION_MAX_PX: f64 = 320.0;
+const MOTION_LENGTHS: [f64; 6] = [6.0, 10.0, 14.0, 18.0, 23.0, 28.0];
 
 /// Crop the candidate (1.5x its ellipse), pad edge-replicate to pow2, and
 /// Wiener-deconvolve a Gaussian PSF. Returns (patch, T) with T the
@@ -600,6 +605,141 @@ fn deconv_retry(
             if let Some(mut hit) = try_decode_spec(&patch, &hp, sp, conf_erasure) {
                 hit.chosen_h = mat::matmul(&tinv, &hit.chosen_h);
                 return Some(hit);
+            }
+        }
+    }
+    None
+}
+
+/// Patch crop rectangle shared by the patch-domain retries (1.5x the ellipse).
+fn patch_bounds(gray: &Gray, geom: &EllipseGeom) -> Option<(usize, usize, usize, usize)> {
+    let r = 0.75 * geom.major.max(geom.minor);
+    let x0 = (geom.cx - r).max(0.0) as i64;
+    let y0 = (geom.cy - r).max(0.0) as i64;
+    let x1 = (geom.cx + r).min(gray.w as f64) as i64;
+    let y1 = (geom.cy + r).min(gray.h as f64) as i64;
+    if x1 - x0 < 12 || y1 - y0 < 12 {
+        return None;
+    }
+    Some((x0 as usize, y0 as usize, x1 as usize, y1 as usize))
+}
+
+/// Structure tensor over the candidate patch -> (coherence, gradient axis deg).
+/// Sobel 3x3 (reflect-101 border, like cv2's default). Motion smear suppresses
+/// gradients along the blur direction, so coherence ~0 for still/isotropic
+/// patches and ->1 under directional smear; blur axis = gradient axis + 90.
+fn motion_stats(gray: &Gray, geom: &EllipseGeom) -> (f64, f64) {
+    let (x0, y0, x1, y1) = match patch_bounds(gray, geom) {
+        Some(b) => b,
+        None => return (0.0, 0.0),
+    };
+    let (pw, ph) = (x1 - x0, y1 - y0);
+    let at = |x: i64, y: i64| -> f64 {
+        // BORDER_REFLECT_101 within the patch
+        let rx = if x < 0 { -x } else if x >= pw as i64 { 2 * (pw as i64 - 1) - x } else { x };
+        let ry = if y < 0 { -y } else if y >= ph as i64 { 2 * (ph as i64 - 1) - y } else { y };
+        gray.px[(y0 + ry as usize) * gray.w + (x0 + rx as usize)] as f64
+    };
+    let (mut jxx, mut jyy, mut jxy) = (0f64, 0f64, 0f64);
+    for y in 0..ph as i64 {
+        for x in 0..pw as i64 {
+            let gx = (at(x + 1, y - 1) + 2.0 * at(x + 1, y) + at(x + 1, y + 1))
+                - (at(x - 1, y - 1) + 2.0 * at(x - 1, y) + at(x - 1, y + 1));
+            let gy = (at(x - 1, y + 1) + 2.0 * at(x, y + 1) + at(x + 1, y + 1))
+                - (at(x - 1, y - 1) + 2.0 * at(x, y - 1) + at(x + 1, y - 1));
+            jxx += gx * gx;
+            jyy += gy * gy;
+            jxy += gx * gy;
+        }
+    }
+    let tr = jxx + jyy;
+    if tr <= 1e-9 {
+        return (0.0, 0.0);
+    }
+    let coherence = ((jxx - jyy).powi(2) + (2.0 * jxy).powi(2)).sqrt() / tr;
+    let angle = (0.5 * (2.0 * jxy).atan2(jxx - jyy)).to_degrees();
+    (coherence, angle)
+}
+
+#[inline]
+fn sinc(x: f64) -> f64 {
+    // np.sinc: sin(pi x) / (pi x), 1 at x = 0
+    if x == 0.0 {
+        1.0
+    } else {
+        let px = std::f64::consts::PI * x;
+        px.sin() / px
+    }
+}
+
+/// Line-PSF Wiener deconvolution of the candidate patch: PSF = a `length`-px
+/// line at angle_deg, spectrum sinc(length * f_along). Same crop/pad scheme
+/// as deconv_patch. Returns (patch, T) or None.
+fn motion_deconv_patch(
+    gray: &Gray,
+    geom: &EllipseGeom,
+    length: f64,
+    angle_deg: f64,
+) -> Option<(Gray, M3)> {
+    let (x0, y0, x1, y1) = patch_bounds(gray, geom)?;
+    let (pw, ph) = (x1 - x0, y1 - y0);
+    let fw = pw.next_power_of_two();
+    let fh = ph.next_power_of_two();
+    let mut padded = vec![0f64; fh * fw];
+    for y in 0..fh {
+        let sy = y.min(ph - 1);
+        for x in 0..fw {
+            let sx = x.min(pw - 1);
+            padded[y * fw + x] = gray.px[(y0 + sy) * gray.w + (x0 + sx)] as f64;
+        }
+    }
+    let fys = crate::fft::fftfreq(fh);
+    let fxs = crate::fft::fftfreq(fw);
+    let (s, c) = angle_deg.to_radians().sin_cos();
+    let filt: Vec<f64> = (0..fh * fw)
+        .map(|i| {
+            let g = sinc(length * (fxs[i % fw] * c + fys[i / fw] * s));
+            g / (g * g + DECONV_LAMBDA)
+        })
+        .collect();
+    let out = crate::fft::filter2d_real(&padded, fh, fw, &filt);
+    let mut px = vec![0u8; ph * pw];
+    for y in 0..ph {
+        for x in 0..pw {
+            px[y * pw + x] = out[y * fw + x].clamp(0.0, 255.0) as u8;
+        }
+    }
+    let t = [[1.0, 0.0, -(x0 as f64)], [0.0, 1.0, -(y0 as f64)], [0.0, 0.0, 1.0]];
+    Some((Gray { w: pw, h: ph, px }, t))
+}
+
+/// Directional-smear retry: line-PSF Wiener at the estimated blur axis (and
+/// its perpendicular, guarding the tensor's 2-fold ambiguity). Runs only when
+/// every other attempt failed and the patch is measurably anisotropic.
+fn motion_retry(
+    gray: &Gray,
+    geom: &EllipseGeom,
+    hs: &[M3],
+    specs: &[&'static MarkerSpec],
+    conf_erasure: f32,
+) -> Option<DecodeHit> {
+    if geom.major.max(geom.minor) >= MOTION_MAX_PX {
+        return None;
+    }
+    let (coherence, grad_axis) = motion_stats(gray, geom);
+    if coherence <= MOTION_COHERENCE_MIN {
+        return None;
+    }
+    for dang in [grad_axis + 90.0, grad_axis] {
+        for &len in &MOTION_LENGTHS {
+            let (patch, t) = motion_deconv_patch(gray, geom, len, dang)?;
+            let hp: Vec<M3> = hs.iter().map(|h| mat::matmul(&t, h)).collect();
+            let tinv = mat::inv3(&t);
+            for sp in specs {
+                if let Some(mut hit) = try_decode_spec(&patch, &hp, sp, conf_erasure) {
+                    hit.chosen_h = mat::matmul(&tinv, &hit.chosen_h);
+                    return Some(hit);
+                }
             }
         }
     }
@@ -843,6 +983,13 @@ pub fn detect_markers(
                 path = "deconv";
             }
         }
+        // Motion-blur retry: directional smear on a failed candidate.
+        if hit.is_none() {
+            hit = motion_retry(work_gray, &geom1, &hs, specs, conf_erasure);
+            if hit.is_some() {
+                path = "motion";
+            }
+        }
         if hit.is_none() && (cand.inner.is_none() || !pose_only) {
             return None;
         }
@@ -994,6 +1141,14 @@ pub fn detect(
             found = deconv_retry(work_gray, &geom1, &hs, specs, conf_erasure)
                 .map(|hit| {
                     path = "deconv";
+                    (hit, geom1)
+                });
+        }
+        // Motion-blur retry (see detect_markers)
+        if found.is_none() {
+            found = motion_retry(work_gray, &geom1, &hs, specs, conf_erasure)
+                .map(|hit| {
+                    path = "motion";
                     (hit, geom1)
                 });
         }

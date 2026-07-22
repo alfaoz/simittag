@@ -40,6 +40,17 @@ DECONV_SIGMAS = (1.0, 1.6)  # assumed PSF sigmas (image px) to try
 # after scaling by its known radius. This fallback is decode-verified like every
 # other geometry hypothesis and runs only after the normal outer/label attempts.
 BULLSEYE_FALLBACK = True
+# Motion-blur retry: the Gaussian deconv assumes an isotropic PSF, but motion
+# smear is a line. When every other attempt failed AND the candidate patch
+# shows directional smear (structure-tensor coherence; still tags measure
+# <=0.06, clutter medians 0.03, motion >=12px smear measures >=0.39), retry
+# with a line-PSF Wiener filter along the estimated blur axis. Decode-verified
+# like every retry. Measured (~180px tag, 960px frame, tilt 15, >=90% decode):
+# motion tolerance M 18 -> 30px smear, D 12 -> 24px, T 30 -> ~36px.
+MOTION_DECONV = True
+MOTION_COHERENCE_MIN = 0.25  # gate: skip still/isotropic candidates (cheap)
+MOTION_MAX_PX = 320          # patch FFT cost cap (pad <= 512)
+MOTION_LENGTHS = (6, 10, 14, 18, 23, 28)  # assumed smear lengths (px)
 # NOTE: no upsampling before the FFT -- measured STRICTLY BETTER than cubic
 # 2x/3x upsample variants (up=3 cost D@7.5m 29->19/30; cubic overshoot is
 # amplified by the Wiener filter), and native-res sampling keeps the Rust port
@@ -86,6 +97,89 @@ def _deconv_patch(gray, geom, sigma, lam=0.01):
     out = np.clip(out, 0, 255).astype(np.uint8)
     T = np.array([[1.0, 0, -x0], [0, 1.0, -y0], [0, 0, 1.0]])
     return out, T
+
+
+def _patch_bounds(gray, geom):
+    """Crop rectangle used by every patch-domain retry (1.5x the ellipse)."""
+    (cx, cy), (MA, ma), _ = geom
+    r = 0.75 * max(MA, ma)
+    x0, y0 = int(max(0, cx - r)), int(max(0, cy - r))
+    x1 = int(min(gray.shape[1], cx + r)); y1 = int(min(gray.shape[0], cy + r))
+    if x1 - x0 < 12 or y1 - y0 < 12:
+        return None
+    return x0, y0, x1, y1
+
+
+def _motion_stats(gray, geom):
+    """
+    Structure tensor over the candidate patch -> (coherence, gradient_axis_deg).
+    Motion smear suppresses gradients ALONG the blur direction, so gradient
+    energy concentrates on the perpendicular axis: coherence ~0 for still or
+    isotropic patches, ->1 for directional smear; the blur axis is the
+    gradient axis + 90 deg.
+    """
+    b = _patch_bounds(gray, geom)
+    if b is None:
+        return 0.0, 0.0
+    x0, y0, x1, y1 = b
+    p = gray[y0:y1, x0:x1].astype(np.float64)
+    gx = cv2.Sobel(p, cv2.CV_64F, 1, 0)
+    gy = cv2.Sobel(p, cv2.CV_64F, 0, 1)
+    jxx = float((gx * gx).sum()); jyy = float((gy * gy).sum())
+    jxy = float((gx * gy).sum())
+    tr = jxx + jyy
+    if tr <= 1e-9:
+        return 0.0, 0.0
+    coherence = float(np.hypot(jxx - jyy, 2 * jxy)) / tr
+    angle = float(np.degrees(0.5 * np.arctan2(2 * jxy, jxx - jyy)))
+    return coherence, angle
+
+
+def _motion_deconv_patch(gray, geom, length, angle_deg, lam=0.01):
+    """
+    Line-PSF Wiener deconvolution of the candidate patch (same crop/pad scheme
+    as _deconv_patch): PSF = a length-`length` px line at angle_deg, whose
+    spectrum is sinc(length * f_along). Returns (patch, T) or (None, None).
+    """
+    b = _patch_bounds(gray, geom)
+    if b is None:
+        return None, None
+    x0, y0, x1, y1 = b
+    patch = gray[y0:y1, x0:x1].astype(np.float64)
+    ph, pw = patch.shape
+    fh = 1 << (ph - 1).bit_length()
+    fw = 1 << (pw - 1).bit_length()
+    padded = np.pad(patch, ((0, fh - ph), (0, fw - pw)), mode="edge")
+    F = np.fft.rfft2(padded)
+    fy = np.fft.fftfreq(fh)[:, None]
+    fx = np.fft.rfftfreq(fw)[None, :]
+    th = np.radians(angle_deg)
+    G = np.sinc(length * (fx * np.cos(th) + fy * np.sin(th)))
+    out = np.fft.irfft2(F * G / (G * G + lam), s=padded.shape)[:ph, :pw]
+    out = np.clip(out, 0, 255).astype(np.uint8)
+    T = np.array([[1.0, 0, -x0], [0, 1.0, -y0], [0, 0, 1.0]])
+    return out, T
+
+
+def _try_motion_deconv(gray, geom, Hs, specs, conf_erasure):
+    """Directional-smear retry: line-PSF Wiener at the estimated blur axis
+    (and its perpendicular, guarding the 2-fold tensor ambiguity)."""
+    if not MOTION_DECONV or max(geom[1]) >= MOTION_MAX_PX:
+        return None, None
+    coherence, grad_axis = _motion_stats(gray, geom)
+    if coherence <= MOTION_COHERENCE_MIN:
+        return None, None
+    for dang in (grad_axis + 90.0, grad_axis):
+        for L in MOTION_LENGTHS:
+            patch, T = _motion_deconv_patch(gray, geom, L, dang)
+            if patch is None:
+                return None, None
+            Hp = [T @ Hh for Hh in Hs]
+            for sp in specs:
+                decoded, H = _try_decode_spec(patch, Hp, sp, conf_erasure)
+                if decoded is not None:
+                    return decoded, np.linalg.inv(T) @ H
+    return None, None
 
 
 def default_K(width, height, fov_deg=60.0):
@@ -761,6 +855,12 @@ def detect_markers(gray, spec=None, K=None, conf_erasure=0.25, versions=None,
                         break
                 if decoded is not None:
                     break
+        # Motion-blur retry: line-PSF deconv when the failed candidate shows
+        # directional smear (see MOTION_DECONV above).
+        if decoded is None:
+            decoded, H = _try_motion_deconv(gray, geom1, Hs, specs, conf_erasure)
+            if decoded is not None:
+                chosen_H = H
         # Relaxed gates let lone round contours through; show a POSE-ONLY box only when
         # there's a concentric child (real nested-ring marker). A decoded marker is
         # always kept. This keeps the range win without spraying boxes on stray circles.
@@ -851,6 +951,11 @@ def detect(gray, spec=None, K=None, conf_erasure=0.25, versions=None, dist=None)
                         break
                 if hit is not None:
                     break
+        # Motion-blur retry (see detect_markers)
+        if hit is None:
+            decoded, H = _try_motion_deconv(gray, geom1, Hs, specs, conf_erasure)
+            if decoded is not None:
+                hit = (decoded, H, geom1)
         if hit is None:
             continue
         decoded, H, g = hit
