@@ -8,7 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-simittag-core = { path = "../simittag-core", version = "0.1.0", features = ["parallel"] }
+simittag-core = { path = "../simittag-core", version = "0.1.1", features = ["parallel"] }
 # arbitrary_precision: fixture ints exceed u64 (D IDs are 80-bit) and floats
 # must be compared from their exact literals, not a lossy f64 pre-parse
 serde_json = { version = "1", features = ["arbitrary_precision"] }

@@ -1,6 +1,6 @@
 [package]
 name = "simittag_ros"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "BSD-2-Clause"
 description = "ROS 2 node for the simittag circular fiducial detector"

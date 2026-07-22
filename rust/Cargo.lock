@@ -272,7 +272,7 @@ checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
 name = "simittag-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "png",
  "serde_json",
@@ -281,14 +281,14 @@ dependencies = [
 
 [[package]]
 name = "simittag-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rayon",
 ]
 
 [[package]]
 name = "simittag-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "simittag-core",
  "wasm-bindgen",
