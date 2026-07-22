@@ -638,8 +638,8 @@ pub struct DecodeHit {
 // Decode-verify gate + deconvolution retry: constants mirror the Python
 // reference (detect.py), where their calibration data lives.
 const VERIFY_MIN: f64 = 0.73;
-const DECONV_MAX_PX: f64 = 80.0;
-const DECONV_SIGMAS: [f64; 2] = [1.0, 1.6];
+const DECONV_MAX_PX: f64 = 160.0;
+const DECONV_SIGMAS: [f64; 3] = [1.0, 1.6, 2.4];
 const DECONV_LAMBDA: f64 = 0.01;
 // Motion-blur retry (line-PSF Wiener); see detect.py for the calibration:
 // still tags / clutter measure coherence <=~0.32, motion >=12px smear >=0.39.

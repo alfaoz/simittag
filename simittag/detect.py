@@ -33,8 +33,14 @@ SYNC_MIN = 0.70
 # floors (A4 tag, 1080p, blur 1.0 noise 3 jpeg 85): T 9->12m, M 6->8.5m,
 # D 5->7m; decode floors T~24px M~34px D~42px outer diameter.
 DECONV_SMALL = True
-DECONV_MAX_PX = 80        # only retry candidates smaller than this (major axis)
-DECONV_SIGMAS = (1.0, 1.6)  # assumed PSF sigmas (image px) to try
+DECONV_MAX_PX = 160       # only retry candidates smaller than this (major axis)
+DECONV_SIGMAS = (1.0, 1.6, 2.4)  # assumed PSF sigmas (image px) to try
+# The 160px cap + 2.4 sigma exist for HEAVY defocus: at blur 2.0 a tag can
+# fail to decode at 60-110px (cells are smeared, not small), which the old
+# 80px/1.6-sigma retry never reached. Measured (blur 2.0, noise 3, jpeg 85,
+# tilt 15): M 60px 11/15 -> 15/15, M 90px 10/15 -> 15/15, D 90px 0/15 ->
+# 15/15. Appended sigma + raised cap only run after everything else failed,
+# so healthy frames pay nothing.
 # If an occluder breaks the outer ring, the intact bullseye can still be fitted.
 # It is a concentric circle on the same plane, so its conic supplies the same pose
 # after scaling by its known radius. This fallback is decode-verified like every
