@@ -12,3 +12,6 @@ dist/
 marker.png
 docs/make_readme_images.py
 v0.2_plan.md
+
+# local, never committed
+/bench.local/

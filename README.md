@@ -251,12 +251,20 @@ Two accept gates guard the search. A sync-ring correlation gate filters non-tag 
 
 Comparison with Other Fiducial Systems
 ======================================
-We did some head-to-head testing against AprilTag (tag36h11, via `pupil-apriltags`) with identical print size, camera model, poses, and image degradation, at 15 degrees of tilt. Range is the farthest distance with at least 90% decode of an A4-printed tag:
+We did some head-to-head testing against AprilTag (tag36h11, via `pupil-apriltags`, full resolution) and ArUco (6x6, DICT_6X6_250, via OpenCV's `cv2.aruco` with default detector parameters) with identical print size, camera model, poses, and image degradation, at 15 degrees of tilt. Range is the farthest distance with at least 90% decode of an A4-printed tag:
 
-| Camera width | Simittag T | Simittag M | Simittag D | AprilTag 36h11 |
-|---|---:|---:|---:|---:|
-| 1280 px | 8.5 m | 6.5 m | 5.0 m | 9.0 m |
-| 1920 px | 13.0 m | 10.0 m | 8.0 m | 13.5 m |
+| Camera width | Simittag T | Simittag M | Simittag D | AprilTag 36h11 | ArUco 6x6 |
+|---|---:|---:|---:|---:|---:|
+| 1280 px | 8.5 m | 6.5 m | 5.0 m | 9.0 m | 10.0 m |
+| 1920 px | 13.0 m | 10.0 m | 8.0 m | 13.5 m | 15.0 m |
+
+Detection speed on the same machine (Apple M4 Pro, 14 threads), one 1280x1280 frame containing six of each system's own tags at comparable pixel sizes, same degradation, every detector multithreaded and at full resolution:
+
+| Detector | Time | Relative |
+|---|---:|---:|
+| Simittag (Rust native) | 10.6 ms | 100% |
+| AprilTag (`pupil-apriltags`) | 4.9 ms | 46% |
+| ArUco (OpenCV) | 2.8 ms | 26% |
 
 DataMatrix and QR codes store more bytes in the same area, because squares tile and rings do not. They provide no pose.
 
