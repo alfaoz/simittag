@@ -9,7 +9,7 @@ Simittag is a circular visual fiducial system. Each tag carries a data payload a
 
 Tags come in three default variants. We recommend the s16m variant unless you have a specific reason to choose otherwise.
 
-<img src="docs/images/variants.png" alt="The three Simittag variants" width="760">
+<img src="docs/images/variants.png" alt="The three default Simittag variants" width="760">
 
 Table of Contents
 =================
