@@ -58,6 +58,8 @@ The three variants share the same ring layout. Detection and pose estimation are
 | sim96c32 | s16m | 4×24 | 4 bytes | 16.7 M | 2 errors / 3 erasures |
 | sim180c88 | sdata | 5×36 | 11 bytes | 2⁸⁸ | 3 errors / 5 erasures |
 
+There is also an experimental fourth variant, `sim48c16` (`s64k`): 65,536 IDs at near-s256 range. See [the s64k section](#experimental-the-s64k-variant) under Detection Range.
+
 Every variant has two interchangeable names: a canonical technical name (`sim<cells>c<payload bits>`) and a short alias. Both are accepted wherever a variant is selected, and detections report both. Earlier releases called these variants T, M, and D; those letters are still accepted as input but are deprecated. Printed tags are unaffected by naming, since tags carry sync patterns, not names.
 
 Some heuristics for choosing:
@@ -245,7 +247,7 @@ Measured with an A4-printed tag (175 mm outer diameter) on a 1080p, 60-degree-HF
 
 | Variant | Range, facing (m) | Range, 25° tilt (m) | Decode floor (px) |
 |---|---:|---:|---:|
-| s256 | 14 | 13.5 | ~21 |
+| s256 | 13 | 13 | ~22 |
 | s16m | 10 | 9.5 | ~29 |
 | sdata | 8.5 | 8 | ~34 |
 
@@ -259,6 +261,20 @@ Two more retries follow the same pattern. Under motion blur the point-spread is 
 
 Occlusion is handled by geometry rather than deconvolution. When an occluder breaks the outer-ring contour, the intact bullseye is fitted as its own candidate and recovers the same projective geometry after scaling by its known radius. Small lone disks, down to a fitted radius of 4 px, are admitted into this fallback only, so normal frames pay nothing for it. Measured with a straight-edge occluder on the A4 rig: a 96 px s16m tag decodes through 20% occlusion in 56 of 60 trials and through 30% in 44 of 60; at 64 px the rates are 29, 15, 9, and 5 of 60 at 5, 10, 15, and 20% occlusion. On the same frames AprilTag and ArUco stop detecting at 5% occlusion. Below about 55 px the bullseye ellipse is too small to carry the data grid, and occlusion tolerance ends.
 
+### Experimental: the s64k variant
+
+`sim48c16`, alias `s64k`, is an experimental fourth variant: the same 3×16 grid and print geometry as s256, but the 32 data cells carry Reed-Solomon nibbles over GF(16) instead of bytes, with a 4-bit CRC. The payload is a headerless 16-bit ID.
+
+| Variant | Alias | Grid | Payload | Distinct IDs | Corrects | Range, 15° tilt (m) | Decode floor (px) |
+|:-:|:-:|:-:|:-:|:-:|:-:|---:|---:|
+| sim48c16 | s64k | 3×16 | 16-bit ID | 65,536 | 1 error / 2 erasures | 12 | ~24 |
+
+The positioning is ID capacity: 65,536 IDs at close to s256's range, where s256 offers 256 IDs and s16m's 16.7 M IDs cost about 2.5 m of range on the same rig (s256 13.1 m, s64k 12.2 m, s16m 10.0 m at 15° tilt, A4 print, 1080p). AprilTag 36h11, for comparison, has 587 IDs.
+
+Because s64k shares s256's grid, telling them apart rests on their synchronization patterns and codecs rather than on geometry. The patterns were chosen jointly for worst-case cross-correlation margin, and s64k additionally carries a raised decode-verify floor (0.78 instead of the global 0.73). We measured the cross-rejection directly: across roughly 150,000 trials of each variant's tags against the other's decoder — sizes from 16 px to 128 px, both polarities, degradations up to heavy defocus with strong noise — zero cross-decodes. The 600-frame clutter suite also remains at zero false positives with s64k enabled. In the same measurements s64k itself returned zero wrong IDs across every condition tested; treat that as provisional while the variant is experimental.
+
+Auto-detection includes s64k. Tags that decode as one of the three v1 variants never pay for it, and the six-tag benchmark frame is unchanged (~6 ms); cluttered failure-path frames pay under 0.1 ms more.
+
 Two accept gates guard the search. A sync-ring correlation gate filters non-tag grids before Reed-Solomon runs. After any successful decode, the observed grid is correlated against the re-encoded decoded pattern (a matched filter of the image against what was decoded) and the result is rejected below 0.73. In calibration, correct decodes scored at least 0.807. Across 600 procedurally generated ring-like clutter frames, CRC-valid wrong-decode candidates scored at most 0.673 and none passed the gate. This leaves a measured empty interval between false and correct candidates while preserving margin for degraded real tags.
 
 Comparison with Other Fiducial Systems
@@ -267,8 +283,8 @@ We did some head-to-head testing against AprilTag (tag36h11, via `pupil-apriltag
 
 | Camera width | Simittag s256 | Simittag s16m | Simittag sdata | AprilTag 36h11 | ArUco 6x6 |
 |---|---:|---:|---:|---:|---:|
-| 1280 px | 9.4 m | 6.7 m | 5.6 m | 9.6 m | 10.0 m |
-| 1920 px | 14.0 m | 10.0 m | 8.5 m | 14.4 m | 15.0 m |
+| 1280 px | 8.7 m | 6.7 m | 5.6 m | 9.6 m | 10.0 m |
+| 1920 px | 13.1 m | 10.0 m | 8.5 m | 14.4 m | 15.0 m |
 
 Detection speed on the same machine (Apple M4 Pro, 14 threads), one 1280x1280 frame containing six of each system's own tags at comparable pixel sizes, same degradation, every detector multithreaded and at full resolution:
 

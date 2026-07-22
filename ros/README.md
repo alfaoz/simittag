@@ -63,7 +63,7 @@ Parameters
 | name | default | |
 |---|---|---|
 | `tag_diameter_m` | required | outer edge of the outer black ring, meters, as printed |
-| `variant` | `auto` | a canonical name (`sim96c32`), an alias (`s16m`), or `auto`; pinning is faster and refuses other variants. Deprecated `T`/`M`/`D` still accepted |
+| `variant` | `auto` | a canonical name (`sim96c32`), an alias (`s16m`, including the experimental `s64k`), or `auto`; pinning is faster and refuses other variants. Deprecated `T`/`M`/`D` still accepted |
 | `image_topic` | `/camera/image_raw` | |
 | `camera_info_topic` | `/camera/camera_info` | |
 | `detections_topic` | `/simittag/detections` | |

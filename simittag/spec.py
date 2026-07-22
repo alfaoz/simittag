@@ -61,13 +61,30 @@ class MarkerSpec:
     HAS_SYNC: bool = True
 
     # --- codec ---
-    # Reed-Solomon over GF(256). The DATA rings carry the codeword.
-    # M: rings 1..3 * 24 sectors = 72 cells = 9 bytes = RS_K data + RS_NSYM parity.
-    RS_K: int = 5                # data bytes (incl. CRC byte)  -> 4 payload + 1 CRC8
-    RS_NSYM: int = 4             # parity bytes -> corrects 2 errors OR 3 erasures
+    # Reed-Solomon over GF(2^SYMBOL_BITS). The DATA rings carry the codeword.
+    # SYMBOL_BITS=8: bytes over GF(256) with CRC8 (the v1 variants).
+    # SYMBOL_BITS=4: nibbles over GF(16) with CRC4 (the small-grid v2 variants,
+    #   where a byte symbol would span a quarter of the grid).
+    # sim96c32: rings 1..3 * 24 sectors = 72 cells = 9 bytes = RS_K + RS_NSYM.
+    SYMBOL_BITS: int = 8
+    RS_K: int = 5                # data symbols (incl. CRC symbol) -> 4 payload + CRC8
+    RS_NSYM: int = 4             # parity symbols -> corrects 2 errors OR 3 erasures
                                  # (erasures capped at NSYM-1 for a detection margin;
                                  # see codec.decode)
-    CRC_BYTES: int = 1           # of the RS_K data bytes, this many are CRC8
+    CRC_BYTES: int = 1           # of the RS_K data symbols, this many are CRC
+                                 # (one CRC8 byte or one CRC4 nibble)
+    # Cap on BLIND RS error corrections (None = the code's full floor(NSYM/2)).
+    # Erasure corrections are never capped by this. Small codes can trade a
+    # sliver of recall for a lower wrong-value rate here; see codec.decode.
+    MAX_ERRORS: object = None
+    # Per-variant decode-verify floor (None = the detector's global gate,
+    # 0.73). Same-grid variants need a higher floor: the global gate was
+    # calibrated against CLUTTER, but a wrong-variant read of a REAL same-grid
+    # tag through a misregistered deconvolved view can self-consistently
+    # decode and land inside the clutter-calibrated margin (measured worst
+    # 0.759 for inverted s256 -> s64k over ~43k stress trials; wrong-variant
+    # survivor p99 = 0.664). See detect.VERIFY_MIN and NOTES R3.4.
+    VERIFY_MIN: object = None
 
     # payload-mode header: s16m/sdata spend 1 byte on a (version<<4)|mode header
     # so one marker can be ID/GEO/RAW/TAGGED. s256 is a pure tracking tag (ID
@@ -90,10 +107,11 @@ class MarkerSpec:
         assert 0 <= self.SYNC_RING < self.RING_COUNT
         if self.HAS_SYNC:
             assert len(self.SYNC) == self.SECTOR_COUNT, "SYNC length must equal SECTOR_COUNT"
+        assert self.SYMBOL_BITS in (4, 8)
         total_data_cells = self.data_ring_count * self.SECTOR_COUNT
-        assert total_data_cells == 8 * (self.RS_K + self.RS_NSYM), (
-            f"{total_data_cells} data cells must equal 8*(RS_K+RS_NSYM)="
-            f"{8*(self.RS_K + self.RS_NSYM)}"
+        assert total_data_cells == self.SYMBOL_BITS * (self.RS_K + self.RS_NSYM), (
+            f"{total_data_cells} data cells must equal SYMBOL_BITS*(RS_K+RS_NSYM)="
+            f"{self.SYMBOL_BITS*(self.RS_K + self.RS_NSYM)}"
         )
 
     # ---- derived geometry helpers ----
@@ -125,12 +143,16 @@ class MarkerSpec:
         return (np.arange(self.SECTOR_COUNT) + 0.5) * (2 * np.pi / self.SECTOR_COUNT)
 
     @property
-    def payload_bytes(self) -> int:
-        return self.RS_K - self.CRC_BYTES
+    def payload_bits(self) -> int:
+        return (self.RS_K - self.CRC_BYTES) * self.SYMBOL_BITS
 
     @property
-    def payload_bits(self) -> int:
-        return self.payload_bytes * 8
+    def payload_bytes(self) -> int:
+        """Bytes in the canonical payload representation. Payloads are always
+        handled as big-endian byte strings; when payload_bits is not a byte
+        multiple (nibble variants), the high pad bits of the first byte are
+        zero (enforced by codec.encode)."""
+        return (self.payload_bits + 7) // 8
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +208,25 @@ D_SPEC = MarkerSpec(
           1, 1, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0),
 )
 
+# sim48c16 / s64k -- EXPERIMENTAL tracking tag with a 16-bit ID space: the
+#   same 3x16 grid and radial layout as sim48c8 (so near-s256 range), but the
+#   32 data cells carry 8 GF(16) NIBBLES instead of 4 bytes: 4 ID nibbles +
+#   CRC4 + RS(8,5) parity (corrects 1 symbol error or 2 ranked erasures).
+#   65,536 IDs at tracking-tag range -- 256x s256's ID space for ~1px of
+#   decode floor (lab-measured px90 23.5 vs s256's 22.1 at std tilt 15).
+#   Nibble symbols matter at this grid size: one GF(256) byte would span a
+#   quarter of the grid, so any localized smear would burn multiple symbols.
+#   Sharing the 3x16 grid means auto-detect between s256/s64k rests ONLY on
+#   the sync patterns + codec + verify gate; SYNC below was chosen jointly
+#   with the family for cross-correlation margin (worst |cross| 6 vs the
+#   sync gate's 12, all shifts and polarities) and autocorr sidelobe 4.
+S64K_SPEC = MarkerSpec(
+    NAME="sim48c16", ALIAS="s64k", RING_COUNT=3, SECTOR_COUNT=16, HAS_SYNC=True,
+    SYMBOL_BITS=4, RS_K=5, RS_NSYM=3, USE_HEADER=False,
+    SYNC=(0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0),
+    VERIFY_MIN=0.78,
+)
+
 # Deprecated pre-0.2 letters, still accepted as input (never emitted).
 LEGACY_NAMES = {"T": "sim48c8", "M": "sim96c32", "D": "sim180c88"}
 
@@ -219,7 +260,9 @@ class _VariantMap(dict):
             return False
 
 
-VARIANTS = _VariantMap({s.NAME: s for s in (T_SPEC, M_SPEC, D_SPEC)})
+# Auto-detect order: v1 variants first (a candidate that decodes as one of
+# them never pays for the specs after it), experimental v2 variants appended.
+VARIANTS = _VariantMap({s.NAME: s for s in (T_SPEC, M_SPEC, D_SPEC, S64K_SPEC)})
 ALIASES = {s.ALIAS: s.NAME for s in VARIANTS.values()}
 ALIAS_OF = {s.NAME: s.ALIAS for s in VARIANTS.values()}
 
@@ -262,12 +305,12 @@ if __name__ == "__main__":
           f"{'RS':>9} {'payload':>7} {'IDs':>12}  corrects")
     for name, sp in VARIANTS.items():
         cells = sp.data_ring_count * sp.SECTOR_COUNT
-        id_bytes = sp.payload_bytes - (1 if sp.USE_HEADER else 0)  # ID-mode body
-        ids = 1 << (8 * id_bytes)
+        id_bits = sp.payload_bits - (8 if sp.USE_HEADER else 0)  # ID-mode body
+        ids = 1 << id_bits
         sl = f"sl{autocorr_sidelobe(sp.SYNC)}" if sp.HAS_SYNC else "none"
         print(f"  {name:>10} {sp.ALIAS:>6} {f'{sp.RING_COUNT}x{sp.SECTOR_COUNT}':>6} "
               f"{sl:>5} {cells:>5} {f'RS({sp.RS_K+sp.RS_NSYM},{sp.RS_K})':>9} "
-              f"{f'{sp.payload_bytes}B':>7} {ids:>12,}  "
+              f"{f'{sp.payload_bits}b':>7} {ids:>12,}  "
               f"{sp.RS_NSYM//2} err / {sp.RS_NSYM-1} eras")
     # sanity: every accepted spelling resolves, deprecated letters map
     for legacy, canon in LEGACY_NAMES.items():
@@ -275,5 +318,23 @@ if __name__ == "__main__":
         assert normalize_variant(VARIANTS[canon].ALIAS) == canon
     assert resolve_specs("s256")[0] is T_SPEC
     assert resolve_specs(["M", "sdata"]) == [M_SPEC, D_SPEC]
+    # every variant shares the v1 radial layout: detection, conic pose, the
+    # inverted-view probe radii (0.26 / 1.08), and the bullseye fallback all
+    # assume it (detect._needs_inverted_view hardcodes those radii)
+    for sp in VARIANTS.values():
+        assert (sp.R_BULLSEYE, sp.R_DATA_IN, sp.R_DATA_OUT, sp.R_RING_IN) \
+            == (0.22, 0.30, 0.78, 0.86), sp.NAME
+    # same-grid variants (3x16) are disambiguated by sync alone: pin the
+    # cross-correlation margin so a future sync choice can't silently erode it
+    same_grid = [sp for sp in VARIANTS.values()
+                 if (sp.RING_COUNT, sp.SECTOR_COUNT) == (3, 16)]
+    for i, a in enumerate(same_grid):
+        for b in same_grid[i + 1:]:
+            sa = np.where(np.asarray(a.SYNC) > 0, 1, -1)
+            sb = np.where(np.asarray(b.SYNC) > 0, 1, -1)
+            worst = max(abs(int(np.dot(sa, np.roll(sb, k))))
+                        for k in range(len(sb)))
+            assert worst <= 6, (a.NAME, b.NAME, worst)  # gate needs corr >= 12
     print("\n  every variant has a sync ring -> auto-detect by sync-gated decode")
     print("  aliases + deprecated T/M/D letters accepted as input everywhere")
+    print("  same-grid sync cross-correlation margin pinned (worst |corr| <= 6)")

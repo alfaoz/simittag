@@ -4,12 +4,14 @@
 //! Data-cell linear order is sector-major: k = sector*data_rings + (ring - first),
 //! bits packed MSB-first -- exactly the Python ordering, or nothing decodes.
 
+use crate::gf16;
 use crate::gf256;
 use crate::spec::MarkerSpec;
 
-fn bits_to_bytes(bits: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bits.len() / 8);
-    for chunk in bits.chunks(8) {
+/// Pack bits MSB-first into symbols of sb bits (sb=8 -> byte values).
+fn bits_to_syms(bits: &[u8], sb: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bits.len() / sb);
+    for chunk in bits.chunks(sb) {
         let mut b = 0u8;
         for &bit in chunk {
             b = (b << 1) | (bit & 1);
@@ -19,14 +21,77 @@ fn bits_to_bytes(bits: &[u8]) -> Vec<u8> {
     out
 }
 
-fn bytes_to_bits(data: &[u8]) -> Vec<u8> {
-    let mut bits = Vec::with_capacity(data.len() * 8);
-    for &b in data {
-        for j in (0..8).rev() {
-            bits.push((b >> j) & 1);
+fn syms_to_bits(syms: &[u8], sb: usize) -> Vec<u8> {
+    let mut bits = Vec::with_capacity(syms.len() * sb);
+    for &v in syms {
+        for j in (0..sb).rev() {
+            bits.push((v >> j) & 1);
         }
     }
     bits
+}
+
+/// Canonical payload bytes -> data symbols (big-endian; high pad bits must
+/// be zero when payload_bits is not a byte multiple). Mirrors codec.py.
+fn payload_to_syms(payload: &[u8], spec: &MarkerSpec) -> Result<Vec<u8>, String> {
+    if payload.len() != spec.payload_bytes() {
+        return Err(format!(
+            "payload must be {} bytes, got {}",
+            spec.payload_bytes(),
+            payload.len()
+        ));
+    }
+    let mut value = 0u128;
+    for &b in payload {
+        value = (value << 8) | b as u128;
+    }
+    if spec.payload_bits() < 128 && value >> spec.payload_bits() != 0 {
+        return Err(format!("payload exceeds {} bits", spec.payload_bits()));
+    }
+    let sb = spec.symbol_bits;
+    let nsyms = spec.payload_bits() / sb;
+    Ok((0..nsyms)
+        .map(|i| ((value >> (sb * (nsyms - 1 - i))) as u8) & ((1u16 << sb) - 1) as u8)
+        .collect())
+}
+
+/// Data symbols -> canonical payload bytes (big-endian, zero pad bits).
+fn syms_to_payload(syms: &[u8], spec: &MarkerSpec) -> Vec<u8> {
+    let sb = spec.symbol_bits;
+    let mut value = 0u128;
+    for &v in syms {
+        value = (value << sb) | v as u128;
+    }
+    let n = spec.payload_bytes();
+    (0..n).rev().map(|i| (value >> (8 * i)) as u8).collect()
+}
+
+fn crc_of(data_syms: &[u8], spec: &MarkerSpec) -> u8 {
+    if spec.symbol_bits == 4 {
+        gf16::crc4(data_syms)
+    } else {
+        gf256::crc8(data_syms)
+    }
+}
+
+fn rs_encode_spec(data: &[u8], spec: &MarkerSpec) -> Vec<u8> {
+    if spec.symbol_bits == 4 {
+        gf16::rs_encode(data, spec.rs_nsym)
+    } else {
+        gf256::rs_encode(data, spec.rs_nsym)
+    }
+}
+
+fn rs_decode_spec(
+    code: &[u8],
+    spec: &MarkerSpec,
+    erase_pos: &[usize],
+) -> Result<(Vec<u8>, Vec<u8>), ()> {
+    if spec.symbol_bits == 4 {
+        gf16::rs_decode(code, spec.rs_nsym, erase_pos, spec.max_errors)
+    } else {
+        gf256::rs_decode(code, spec.rs_nsym, erase_pos, spec.max_errors)
+    }
 }
 
 /// (k, ring, sector) for the data cells in codeword-bit order.
@@ -37,19 +102,13 @@ fn cell_order(spec: &MarkerSpec) -> impl Iterator<Item = (usize, usize, usize)> 
         .flat_map(move |s| (0..dr).map(move |rd| (s * dr + rd, r0 + rd, s)))
 }
 
-/// payload bytes -> +CRC8 -> RS encode -> bits -> grid (sync ring set).
+/// payload bytes -> +CRC -> RS encode -> bits -> grid (sync ring set).
 pub fn encode(payload: &[u8], spec: &MarkerSpec) -> Result<Vec<u8>, String> {
-    if payload.len() != spec.payload_bytes() {
-        return Err(format!(
-            "payload must be {} bytes, got {}",
-            spec.payload_bytes(),
-            payload.len()
-        ));
-    }
-    let mut data = payload.to_vec();
-    data.push(gf256::crc8(payload));
-    let code = gf256::rs_encode(&data, spec.rs_nsym);
-    let bits = bytes_to_bits(&code);
+    let syms = payload_to_syms(payload, spec)?;
+    let mut data = syms;
+    data.push(crc_of(&data, spec));
+    let code = rs_encode_spec(&data, spec);
+    let bits = syms_to_bits(&code, spec.symbol_bits);
 
     let mut grid = vec![0u8; spec.ring_count * spec.sector_count];
     if spec.has_sync {
@@ -89,6 +148,7 @@ fn decode_aligned(
     spec: &MarkerSpec,
     erasure: Option<&[bool]>,
 ) -> Option<Vec<u8>> {
+    let sb = spec.symbol_bits;
     let nbits = spec.data_ring_count() * spec.sector_count;
     let mut bits = vec![0u8; nbits];
     let mut unreliable = vec![false; nbits];
@@ -98,12 +158,12 @@ fn decode_aligned(
             unreliable[k] = eg[ring * spec.sector_count + sector];
         }
     }
-    let code = bits_to_bytes(&bits);
+    let code = bits_to_syms(&bits, sb);
     let mut erase_pos: Vec<usize> = Vec::new();
     if erasure.is_some() {
         for k in 0..nbits {
-            if unreliable[k] && !erase_pos.contains(&(k / 8)) {
-                erase_pos.push(k / 8);
+            if unreliable[k] && !erase_pos.contains(&(k / sb)) {
+                erase_pos.push(k / sb);
             }
         }
         erase_pos.sort_unstable();
@@ -113,12 +173,13 @@ fn decode_aligned(
         let cap = spec.rs_nsym.saturating_sub(1);
         erase_pos.truncate(cap);
     }
-    let (data, _) = gf256::rs_decode(&code, spec.rs_nsym, &erase_pos).ok()?;
-    let (payload, crc) = (&data[..spec.payload_bytes()], data[spec.payload_bytes()]);
-    if gf256::crc8(payload) != crc {
+    let (data, _) = rs_decode_spec(&code, spec, &erase_pos).ok()?;
+    let nds = spec.rs_k - spec.crc_bytes;
+    let (payload_syms, crc) = (&data[..nds], data[nds]);
+    if crc_of(payload_syms, spec) != crc {
         return None;
     }
-    Some(payload.to_vec())
+    Some(syms_to_payload(payload_syms, spec))
 }
 
 /// Reed-Solomon work done for a successful decode. Report-only diagnostics:
@@ -129,14 +190,15 @@ pub struct RsStats {
     pub corrected: usize, // codeword bytes whose value RS actually changed
 }
 
-/// Per-codeword-byte reliability = weakest cell confidence inside the byte.
-fn byte_reliability(conf: &[f32], spec: &MarkerSpec) -> Vec<f64> {
+/// Per-codeword-symbol reliability = weakest cell confidence in the symbol.
+fn sym_reliability(conf: &[f32], spec: &MarkerSpec) -> Vec<f64> {
+    let sb = spec.symbol_bits;
     let nbits = spec.data_ring_count() * spec.sector_count;
-    let mut rel = vec![f64::INFINITY; nbits / 8];
+    let mut rel = vec![f64::INFINITY; nbits / sb];
     for (k, ring, sector) in cell_order(spec) {
         let c = conf[ring * spec.sector_count + sector] as f64;
-        if c < rel[k / 8] {
-            rel[k / 8] = c;
+        if c < rel[k / sb] {
+            rel[k / sb] = c;
         }
     }
     rel
@@ -156,9 +218,9 @@ fn decode_aligned_ranked(
     for (k, ring, sector) in cell_order(spec) {
         bits[k] = grid[ring * spec.sector_count + sector];
     }
-    let code = bits_to_bytes(&bits);
+    let code = bits_to_syms(&bits, spec.symbol_bits);
 
-    let rel = byte_reliability(conf, spec);
+    let rel = sym_reliability(conf, spec);
     let mut order: Vec<usize> = (0..rel.len()).collect();
     order.sort_by(|&a, &b| rel[a].partial_cmp(&rel[b]).unwrap()); // stable
     let cap = spec.rs_nsym.saturating_sub(1);
@@ -170,16 +232,17 @@ fn decode_aligned_ranked(
         .collect();
     erase_pos.sort_unstable();
 
-    let (data, msg) = gf256::rs_decode(&code, spec.rs_nsym, &erase_pos).ok()?;
-    let (payload, crc) = (&data[..spec.payload_bytes()], data[spec.payload_bytes()]);
-    if gf256::crc8(payload) != crc {
+    let (data, msg) = rs_decode_spec(&code, spec, &erase_pos).ok()?;
+    let nds = spec.rs_k - spec.crc_bytes;
+    let (payload_syms, crc) = (&data[..nds], data[nds]);
+    if crc_of(payload_syms, spec) != crc {
         return None;
     }
-    // corrected counts bytes whose value changed vs the codeword as sampled,
-    // so an erased byte that was actually right does not inflate the number
+    // corrected counts symbols whose value changed vs the codeword as
+    // sampled, so an erased symbol that was right does not inflate the number
     let corrected = code.iter().zip(msg.iter()).filter(|(a, b)| a != b).count();
     Some((
-        payload.to_vec(),
+        syms_to_payload(payload_syms, spec),
         RsStats {
             erasures: erase_pos.len(),
             corrected,

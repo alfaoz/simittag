@@ -972,8 +972,9 @@ fn try_decode_spec_with(
                     // Decode-verify gate: matched filter of the image against
                     // the decoded codeword's full grid; rejects wrong-value
                     // RS+CRC collisions (see the Python reference for the
-                    // measured calibration behind VERIFY_MIN).
-                    if vcorr < VERIFY_MIN {
+                    // measured calibration behind VERIFY_MIN). Per-variant
+                    // floors override the global clutter-calibrated gate.
+                    if vcorr < spec.verify_min.unwrap_or(VERIFY_MIN) {
                         continue;
                     }
                     let d = (refined - theta0 + std::f64::consts::PI)
@@ -1442,6 +1443,7 @@ mod tests {
             (&spec::SIM48C8, 42),
             (&spec::SIM96C32, 0xabcdef),
             (&spec::SIM180C88, 123456789),
+            (&spec::SIM48C16, 0xbeef),
         ] {
             for inverted in [false, true] {
                 let image = render_tag(sp, value, inverted);

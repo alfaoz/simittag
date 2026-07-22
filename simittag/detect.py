@@ -812,6 +812,10 @@ def _try_decode_spec(gray, Hs, spec, conf_erasure, build=None):
                         decoded = ("UNKNOWN", pb)
                     if _VERIFY_LOG is not None:
                         _VERIFY_LOG.append((vcorr, spec.NAME, decoded))
+                    # Per-variant floor (spec.VERIFY_MIN) overrides the global
+                    # clutter-calibrated gate where a variant needs more
+                    # margin (same-grid v2 variants; see spec.py).
+                    vmin = spec.VERIFY_MIN or VERIFY_MIN
                     # Decode-verify gate: the refine correlation IS a matched
                     # filter of the image against the decoded codeword's full
                     # grid. A wrong-value accept (RS+CRC collision on marginal
@@ -819,7 +823,7 @@ def _try_decode_spec(gray, Hs, spec, conf_erasure, build=None):
                     # collapses this correlation, so thresholding it rejects
                     # wrong IDs that no sync gate can catch (the sync ring is
                     # genuinely present on a true tag at the range floor).
-                    if vcorr < VERIFY_MIN:
+                    if vcorr < vmin:
                         continue
                     d = (refined - theta + np.pi) % (2 * np.pi) - np.pi  # no wrap
                     theta = theta + d

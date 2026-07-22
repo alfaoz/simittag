@@ -20,6 +20,7 @@ B=rust/target/release/simittag
 
 echo "== python reference self-tests =="
 python3 -m simittag.gf256
+python3 -m simittag.gf16
 python3 -m simittag.spec
 python3 -m simittag.codec
 python3 -m simittag.payload

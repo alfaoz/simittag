@@ -21,9 +21,19 @@ pub struct MarkerSpec {
     pub has_sync: bool,
     pub use_header: bool,
     // codec
+    /// bits per RS symbol: 8 = bytes over GF(256) + CRC8 (v1 variants),
+    /// 4 = nibbles over GF(16) + CRC4 (small-grid v2 variants)
+    pub symbol_bits: usize,
     pub rs_k: usize,
     pub rs_nsym: usize,
     pub crc_bytes: usize,
+    /// cap on BLIND RS error corrections (None = full floor(NSYM/2));
+    /// erasure corrections are never capped by this
+    pub max_errors: Option<usize>,
+    /// per-variant decode-verify floor (None = the detector's global 0.73
+    /// gate); same-grid variants carry a higher floor -- see the Python
+    /// reference (spec.py / NOTES R3.4) for the measured calibration
+    pub verify_min: Option<f64>,
     pub sync: &'static [u8],
 }
 
@@ -44,8 +54,14 @@ impl MarkerSpec {
         }
     }
 
+    pub fn payload_bits(&self) -> usize {
+        (self.rs_k - self.crc_bytes) * self.symbol_bits
+    }
+
+    /// Bytes in the canonical payload representation (big-endian; high pad
+    /// bits zero when payload_bits is not a byte multiple).
     pub fn payload_bytes(&self) -> usize {
-        self.rs_k - self.crc_bytes
+        (self.payload_bits() + 7) / 8
     }
 
     /// (inner, center, outer) normalized radius of each data ring.
@@ -67,6 +83,9 @@ impl MarkerSpec {
 }
 
 pub static SIM48C8: MarkerSpec = MarkerSpec {
+    symbol_bits: 8,
+    max_errors: None,
+    verify_min: None,
     name: "sim48c8",
     alias: "s256",
     r_bullseye: 0.22,
@@ -84,6 +103,9 @@ pub static SIM48C8: MarkerSpec = MarkerSpec {
 };
 
 pub static SIM96C32: MarkerSpec = MarkerSpec {
+    symbol_bits: 8,
+    max_errors: None,
+    verify_min: None,
     name: "sim96c32",
     alias: "s16m",
     r_bullseye: 0.22,
@@ -103,6 +125,9 @@ pub static SIM96C32: MarkerSpec = MarkerSpec {
 };
 
 pub static SIM180C88: MarkerSpec = MarkerSpec {
+    symbol_bits: 8,
+    max_errors: None,
+    verify_min: None,
     name: "sim180c88",
     alias: "sdata",
     r_bullseye: 0.22,
@@ -122,9 +147,35 @@ pub static SIM180C88: MarkerSpec = MarkerSpec {
     ],
 };
 
-/// Auto-detect order (matches Python's VARIANTS dict order).
-pub fn variants() -> [&'static MarkerSpec; 3] {
-    [&SIM48C8, &SIM96C32, &SIM180C88]
+/// sim48c16 / s64k -- EXPERIMENTAL: sim48c8's 3x16 grid carrying 8 GF(16)
+/// nibbles (4 ID + CRC4 + RS(8,5) parity; 1 err / 2 ranked erasures) for a
+/// 65,536-ID tracking tag at near-s256 range. Same-grid disambiguation vs
+/// sim48c8 rests on the sync patterns (chosen jointly for cross-correlation
+/// margin: worst |cross| 6 vs the sync gate's 12) + codec + verify gate.
+pub static SIM48C16: MarkerSpec = MarkerSpec {
+    symbol_bits: 4,
+    max_errors: None,
+    verify_min: Some(0.78),
+    name: "sim48c16",
+    alias: "s64k",
+    r_bullseye: 0.22,
+    r_data_in: 0.30,
+    r_data_out: 0.78,
+    r_ring_in: 0.86,
+    ring_count: 3,
+    sector_count: 16,
+    has_sync: true,
+    use_header: false,
+    rs_k: 5,
+    rs_nsym: 3,
+    crc_bytes: 1,
+    sync: &[0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0],
+};
+
+/// Auto-detect order (matches Python's VARIANTS dict order): v1 variants
+/// first, experimental v2 variants appended.
+pub fn variants() -> [&'static MarkerSpec; 4] {
+    [&SIM48C8, &SIM96C32, &SIM180C88, &SIM48C16]
 }
 
 /// Resolve any accepted spelling: canonical name, human alias, or the
@@ -134,6 +185,7 @@ pub fn by_name(name: &str) -> Option<&'static MarkerSpec> {
         "sim48c8" | "s256" | "T" => Some(&SIM48C8),
         "sim96c32" | "s16m" | "M" => Some(&SIM96C32),
         "sim180c88" | "sdata" | "D" => Some(&SIM180C88),
+        "sim48c16" | "s64k" => Some(&SIM48C16),
         _ => None,
     }
 }

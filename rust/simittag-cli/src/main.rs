@@ -10,7 +10,7 @@
 //! Rust port performs the identical IEEE-754 operations as the Python reference.
 
 use serde_json::Value as J;
-use simittag_core::{codec, gf256, payload, spec};
+use simittag_core::{codec, gf16, gf256, payload, spec};
 use std::process::exit;
 
 fn hex_to_bytes(s: &str) -> Vec<u8> {
@@ -84,6 +84,20 @@ fn parity_spec(path: &str) -> bool {
             || format!("{} flags", sp.name),
         );
         g.check(sp.alias == f["ALIAS"].as_str().unwrap(), || format!("{} ALIAS", sp.name));
+        g.check(eq_i(sp.symbol_bits, &f["SYMBOL_BITS"]), || format!("{} SYMBOL_BITS", sp.name));
+        g.check(eq_i(sp.payload_bits(), &f["payload_bits"]), || format!("{} payload_bits", sp.name));
+        let max_err_ok = match (&sp.max_errors, &f["MAX_ERRORS"]) {
+            (None, J::Null) => true,
+            (Some(v), w) => Some(*v as i64) == w.as_i64(),
+            _ => false,
+        };
+        g.check(max_err_ok, || format!("{} MAX_ERRORS", sp.name));
+        let vmin_ok = match (&sp.verify_min, &f["VERIFY_MIN"]) {
+            (None, J::Null) => true,
+            (Some(v), w) => w.as_f64().map(|x| (x - v).abs() < 1e-12).unwrap_or(false),
+            _ => false,
+        };
+        g.check(vmin_ok, || format!("{} VERIFY_MIN", sp.name));
         let sync: Vec<u8> = f["SYNC"].as_array().unwrap().iter()
             .map(|v| v.as_i64().unwrap() as u8).collect();
         g.check(sync == sp.sync, || format!("{} SYNC", sp.name));
@@ -145,12 +159,53 @@ fn parity_codec(path: &str) -> bool {
     }
     ok &= g.report();
 
+    let mut g = Gate::new("crc4");
+    for c in fx["crc4"].as_array().unwrap() {
+        let nibbles: Vec<u8> = c["in"].as_array().unwrap().iter()
+            .map(|v| v.as_u64().unwrap() as u8).collect();
+        g.check(gf16::crc4(&nibbles) as i64 == c["out"].as_i64().unwrap(), || c.to_string());
+    }
+    ok &= g.report();
+
+    let mut g = Gate::new("rs16_encode");
+    for c in fx["rs16_encode"].as_array().unwrap() {
+        let data: Vec<u8> = c["data"].as_array().unwrap().iter()
+            .map(|v| v.as_u64().unwrap() as u8).collect();
+        let got = gf16::rs_encode(&data, c["nsym"].as_u64().unwrap() as usize);
+        let want: Vec<u8> = c["code"].as_array().unwrap().iter()
+            .map(|v| v.as_u64().unwrap() as u8).collect();
+        g.check(got == want, || c.to_string());
+    }
+    ok &= g.report();
+
+    let mut g = Gate::new("rs16_decode");
+    for c in fx["rs16_decode"].as_array().unwrap() {
+        let recv: Vec<u8> = c["recv"].as_array().unwrap().iter()
+            .map(|v| v.as_u64().unwrap() as u8).collect();
+        let era: Vec<usize> = c["erase"].as_array().unwrap().iter()
+            .map(|v| v.as_u64().unwrap() as usize).collect();
+        let max_err = c["max_errors"].as_u64().map(|v| v as usize);
+        let got = gf16::rs_decode(&recv, c["nsym"].as_u64().unwrap() as usize,
+                                  &era, max_err);
+        let want = &c["out"];
+        let matches = match (&got, want) {
+            (Err(_), J::Null) => true,
+            (Ok((d, _)), J::Array(a)) => {
+                d.len() == a.len()
+                    && d.iter().zip(a).all(|(x, w)| *x as i64 == w.as_i64().unwrap())
+            }
+            _ => false,
+        };
+        g.check(matches, || c.to_string());
+    }
+    ok &= g.report();
+
     let mut g = Gate::new("rs_decode");
     for c in fx["rs_decode"].as_array().unwrap() {
         let recv = hex_to_bytes(c["recv"].as_str().unwrap());
         let era: Vec<usize> = c["erase"].as_array().unwrap().iter()
             .map(|v| v.as_u64().unwrap() as usize).collect();
-        let got = gf256::rs_decode(&recv, c["nsym"].as_u64().unwrap() as usize, &era);
+        let got = gf256::rs_decode(&recv, c["nsym"].as_u64().unwrap() as usize, &era, None);
         let want = &c["out"];
         let matches = match (&got, want) {
             (Err(_), J::Null) => true,

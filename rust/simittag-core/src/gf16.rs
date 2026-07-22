@@ -1,38 +1,37 @@
-//! Reed-Solomon over GF(256) with erasure support.
-//!
-//! Direct port of simittag/gf256.py (field 0x11D, generator alpha=2, fcr=0;
-//! Berlekamp-Massey + Chien + Forney extended for erasures). Polynomial
-//! convention matches Python: index 0 = highest-degree coefficient. Every code
-//! path is gated bit-exact against fixtures/codec.json, INCLUDING the decode
-//! failures -- a decoder that fails on different inputs than the reference is
-//! a different detector.
+//! Reed-Solomon over GF(16) with erasure support, for nibble-symbol variants
+//! (sim48c16 and friends). Direct port of simittag/gf16.py: field 0x13,
+//! generator alpha=2, fcr=0 -- the gf256 construction one bit narrower, with
+//! the identical Berlekamp-Massey + Chien + Forney pipeline. Symbols are u8
+//! values 0..16. Polynomial convention matches Python: index 0 =
+//! highest-degree coefficient. Gated bit-exact against fixtures/codec.json,
+//! including expected decode failures.
 
-pub const PRIM: u16 = 0x11D;
+pub const PRIM: u8 = 0x13;
 pub const GEN: u8 = 2;
 
-const fn build_tables() -> ([u8; 512], [u8; 256]) {
-    let mut exp = [0u8; 512];
-    let mut log = [0u8; 256];
-    let mut x: u16 = 1;
+const fn build_tables() -> ([u8; 30], [u8; 16]) {
+    let mut exp = [0u8; 30];
+    let mut log = [0u8; 16];
+    let mut x: u8 = 1;
     let mut i = 0;
-    while i < 255 {
-        exp[i] = x as u8;
+    while i < 15 {
+        exp[i] = x;
         log[x as usize] = i as u8;
         x <<= 1;
-        if x & 0x100 != 0 {
+        if x & 0x10 != 0 {
             x ^= PRIM;
         }
         i += 1;
     }
-    let mut j = 255;
-    while j < 512 {
-        exp[j] = exp[j - 255];
+    let mut j = 15;
+    while j < 30 {
+        exp[j] = exp[j - 15];
         j += 1;
     }
     (exp, log)
 }
 
-static TABLES: ([u8; 512], [u8; 256]) = build_tables();
+static TABLES: ([u8; 30], [u8; 16]) = build_tables();
 
 #[inline]
 pub fn gmul(a: u8, b: u8) -> u8 {
@@ -50,20 +49,19 @@ pub fn gdiv(a: u8, b: u8) -> u8 {
         0
     } else {
         let d = TABLES.1[a as usize] as i32 - TABLES.1[b as usize] as i32;
-        TABLES.0[d.rem_euclid(255) as usize]
+        TABLES.0[d.rem_euclid(15) as usize]
     }
 }
 
 #[inline]
 pub fn gpow(a: u8, n: i64) -> u8 {
-    // Python: _EXP[(_LOG[a] * n) % 255] with Python's non-negative modulo
-    let e = (TABLES.1[a as usize] as i64 * n).rem_euclid(255);
+    let e = (TABLES.1[a as usize] as i64 * n).rem_euclid(15);
     TABLES.0[e as usize]
 }
 
 #[inline]
 pub fn ginv(a: u8) -> u8 {
-    TABLES.0[(255 - TABLES.1[a as usize] as usize) % 255]
+    TABLES.0[(15 - TABLES.1[a as usize] as usize) % 15]
 }
 
 fn poly_scale(p: &[u8], x: u8) -> Vec<u8> {
@@ -127,7 +125,7 @@ fn generator_poly(nsym: usize) -> Vec<u8> {
     g
 }
 
-/// Systematic RS: data + nsym parity bytes.
+/// Systematic RS over nibbles: data + nsym parity symbols.
 pub fn rs_encode(data: &[u8], nsym: usize) -> Vec<u8> {
     let gen = generator_poly(nsym);
     let mut padded = data.to_vec();
@@ -144,21 +142,6 @@ fn calc_syndromes(msg: &[u8], nsym: usize) -> Vec<u8> {
         s.push(poly_eval(msg, gpow(GEN, i as i64)));
     }
     s
-}
-
-fn errata_locator(e_pos: &[usize]) -> Vec<u8> {
-    let mut loc = vec![1u8];
-    for &i in e_pos {
-        loc = poly_mul(&loc, &poly_add(&[1], &[gpow(GEN, i as i64), 0]));
-    }
-    loc
-}
-
-fn error_evaluator(synd: &[u8], err_loc: &[u8], nsym: usize) -> Vec<u8> {
-    let mut divisor = vec![0u8; nsym + 2];
-    divisor[0] = 1;
-    let (_, rem) = poly_div(&poly_mul(synd, err_loc), &divisor);
-    rem
 }
 
 fn find_error_locator(synd: &[u8], nsym: usize, erase_count: usize) -> Result<Vec<u8>, ()> {
@@ -185,7 +168,6 @@ fn find_error_locator(synd: &[u8], nsym: usize, erase_count: usize) -> Result<Ve
         err_loc.remove(0);
     }
     let errs = err_loc.len() as i64 - 1;
-    // Python computes this SIGNED: (errs - erase_count)*2 + erase_count > nsym
     if (errs - erase_count as i64) * 2 + erase_count as i64 > nsym as i64 {
         return Err(());
     }
@@ -193,7 +175,7 @@ fn find_error_locator(synd: &[u8], nsym: usize, erase_count: usize) -> Result<Ve
 }
 
 fn find_errors(err_loc: &[u8], nmess: usize) -> Result<Vec<usize>, ()> {
-    let errs = err_loc.len() as i64 - 1; // may be -1 if the locator collapsed
+    let errs = err_loc.len() as i64 - 1;
     let mut pos = Vec::new();
     for i in 0..nmess {
         if poly_eval(err_loc, gpow(GEN, i as i64)) == 0 {
@@ -219,13 +201,18 @@ fn forney_syndromes(synd: &[u8], pos: &[usize], nmess: usize) -> Vec<u8> {
 
 fn correct_errata(msg: &[u8], synd: &[u8], err_pos: &[usize]) -> Vec<u8> {
     let coef_pos: Vec<usize> = err_pos.iter().map(|&p| msg.len() - 1 - p).collect();
-    let err_loc = errata_locator(&coef_pos);
+    let mut err_loc = vec![1u8];
+    for &cp in &coef_pos {
+        err_loc = poly_mul(&err_loc, &poly_add(&[1], &[gpow(GEN, cp as i64), 0]));
+    }
     let synd_rev: Vec<u8> = synd.iter().rev().cloned().collect();
-    let mut err_eval = error_evaluator(&synd_rev, &err_loc, err_loc.len() - 1);
+    let mut divisor = vec![0u8; err_loc.len() + 1];
+    divisor[0] = 1;
+    let (_, mut err_eval) = poly_div(&poly_mul(&synd_rev, &err_loc), &divisor);
     err_eval.reverse();
     let xs: Vec<u8> = coef_pos
         .iter()
-        .map(|&p| gpow(GEN, -(255i64 - p as i64)))
+        .map(|&p| gpow(GEN, -(15i64 - p as i64)))
         .collect();
     let mut e = vec![0u8; msg.len()];
     for (i, &xi) in xs.iter().enumerate() {
@@ -244,10 +231,9 @@ fn correct_errata(msg: &[u8], synd: &[u8], err_pos: &[usize]) -> Vec<u8> {
     poly_add(msg, &e)
 }
 
-/// Correct a received codeword; erase_pos = byte indices known-bad.
-/// max_errors: Err when more than this many BLIND (non-erasure) errors had
-/// to be corrected; erasure correction is still allowed (mirrors Python).
-/// Returns (data, full_codeword) or Err on uncorrectable input.
+/// Correct a received nibble codeword; erase_pos = symbol indices known-bad.
+/// max_errors: Err when more than this many BLIND errors were corrected
+/// (erasures still allowed). Returns (data, full_codeword) or Err.
 pub fn rs_decode(
     msg_in: &[u8],
     nsym: usize,
@@ -285,15 +271,16 @@ pub fn rs_decode(
     Ok((data, msg))
 }
 
-pub fn crc8(data: &[u8]) -> u8 {
+/// CRC-4 (poly x^4+x+1, 0x3 in the low bits) over a nibble sequence.
+pub fn crc4(nibbles: &[u8]) -> u8 {
     let mut crc = 0u8;
-    for &b in data {
-        crc ^= b;
-        for _ in 0..8 {
-            crc = if crc & 0x80 != 0 {
-                (crc << 1) ^ 0x07
+    for &nb in nibbles {
+        crc ^= nb;
+        for _ in 0..4 {
+            crc = if crc & 0x8 != 0 {
+                ((crc << 1) ^ 0x3) & 0xF
             } else {
-                crc << 1
+                (crc << 1) & 0xF
             };
         }
     }
@@ -306,28 +293,47 @@ mod tests {
 
     #[test]
     fn roundtrip_with_errors_and_erasures() {
-        // mirrors the Python __main__ self-test structure (deterministic cases)
-        let data = b"\x12\x34\x56\x78\x9a";
-        let code = rs_encode(data, 4);
-        assert_eq!(&code[..5], data);
-        // 2 blind errors (t = nsym/2)
+        // deterministic mirror of the Python __main__ self-test structure
+        let data = [0x1u8, 0x9, 0xf, 0x3, 0x7];
+        let code = rs_encode(&data, 3);
+        assert_eq!(&code[..5], &data);
+        // 1 blind error (t = nsym/2 for nsym=3)
         let mut c = code.clone();
-        c[1] ^= 0x5c;
-        c[7] ^= 0x11;
-        let (d, _) = rs_decode(&c, 4, &[], None).unwrap();
+        c[2] ^= 0xa;
+        let (d, _) = rs_decode(&c, 3, &[], None).unwrap();
         assert_eq!(d, data);
-        // 3 erasures
+        // 2 erasures
         let mut c = code.clone();
-        c[0] ^= 0xff;
-        c[4] ^= 0x33;
-        c[8] ^= 0x77;
-        let (d, _) = rs_decode(&c, 4, &[0, 4, 8], None).unwrap();
+        c[0] ^= 0xf;
+        c[6] ^= 0x5;
+        let (d, _) = rs_decode(&c, 3, &[0, 6], None).unwrap();
         assert_eq!(d, data);
-        // 3 blind errors must FAIL (or mis-locate -> Err)
+        // 2 blind errors must FAIL or mis-decode (beyond t=1)
         let mut c = code.clone();
         c[0] ^= 1;
-        c[3] ^= 2;
-        c[6] ^= 3;
-        assert!(rs_decode(&c, 4, &[], None).is_err() || rs_decode(&c, 4, &[], None).unwrap().0 != data);
+        c[4] ^= 2;
+        let r = rs_decode(&c, 3, &[], None);
+        assert!(r.is_err() || r.unwrap().0 != data);
+    }
+
+    #[test]
+    fn max_errors_guard() {
+        // RS(8,4) corrects 2 blind errors; the cap turns that into Err while
+        // erasure corrections stay allowed.
+        let data = [0x1u8, 0x2, 0x3, 0x4];
+        let code = rs_encode(&data, 4);
+        let mut c = code.clone();
+        c[0] ^= 5;
+        c[3] ^= 9;
+        assert_eq!(rs_decode(&c, 4, &[], None).unwrap().0, data);
+        assert!(rs_decode(&c, 4, &[], Some(1)).is_err());
+        assert_eq!(rs_decode(&c, 4, &[0, 3], Some(0)).unwrap().0, data);
+    }
+
+    #[test]
+    fn crc4_matches_python() {
+        // crc4([1,2,3,4,5]) = 0x8 (printed by the Python self-test)
+        assert_eq!(crc4(&[1, 2, 3, 4, 5]), 0x8);
+        assert_eq!(crc4(&[]), 0);
     }
 }

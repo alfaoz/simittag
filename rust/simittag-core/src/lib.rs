@@ -9,6 +9,7 @@ pub mod detector;
 pub mod fft;
 pub mod fitellipse;
 pub mod frontend;
+pub mod gf16;
 pub mod gf256;
 pub mod image;
 pub mod mat;

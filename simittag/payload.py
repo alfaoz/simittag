@@ -44,10 +44,13 @@ def _body_bytes(spec):
 
 
 def encode_id(value: int, spec: MarkerSpec = DEFAULT) -> bytes:
-    # USE_HEADER=False (s256): pure tracking tag, the whole payload IS the raw ID.
+    # USE_HEADER=False (s256/s64k): pure tracking tag, the whole payload IS the
+    # raw ID. The ID space is payload_bits, which for nibble variants can be
+    # narrower than the byte representation (sim48c12: 12 bits in 2 bytes).
     body = _body_bytes(spec)
-    if value < 0 or value >= (1 << (8 * body)):
-        mx = (1 << (8 * body)) - 1
+    id_bits = spec.payload_bits - (8 if spec.USE_HEADER else 0)
+    if value < 0 or value >= (1 << id_bits):
+        mx = (1 << id_bits) - 1
         raise ValueError(
             f"ID too big for variant {spec.NAME}: max 0x{mx:x} ({mx}). "
             f"Use sim96c32/s16m (16.7M IDs) or sim180c88/sdata for larger values.")

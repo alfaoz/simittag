@@ -39,7 +39,10 @@ fn be_to_int(b: &[u8]) -> u128 {
 
 pub fn encode_id(value: u128, spec: &MarkerSpec) -> Result<Vec<u8>, String> {
     let body = body_bytes(spec);
-    if body < 16 && value >> (8 * body) != 0 {
+    // ID space is payload_bits, which for headerless nibble variants can be
+    // narrower than the byte representation (sim48c12: 12 bits in 2 bytes).
+    let id_bits = spec.payload_bits() - if spec.use_header { 8 } else { 0 };
+    if id_bits < 128 && value >> id_bits != 0 {
         return Err(format!("ID too big for variant {}", spec.name));
     }
     let mut out = Vec::new();
