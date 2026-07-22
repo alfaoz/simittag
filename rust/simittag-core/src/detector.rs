@@ -272,6 +272,115 @@ fn refine_sample_points(spec: &MarkerSpec) -> SamplePattern {
 // _build_grid
 // ---------------------------------------------------------------------------
 
+/// Canonical sample points for the shadow retry's illumination-plane fit:
+/// both quiet rings at 8 angles (white), bullseye center + 4 interior (black).
+/// Mirrors detect._plane_ref_points.
+fn plane_ref_points(spec: &MarkerSpec) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+    let rq1 = (spec.r_bullseye + spec.r_data_in) / 2.0;
+    let rq2 = (spec.r_data_out + spec.r_ring_in) / 2.0;
+    let mut white = Vec::with_capacity(16);
+    for &rq in &[rq1, rq2] {
+        for i in 0..8 {
+            let a = 2.0 * std::f64::consts::PI * i as f64 / 8.0;
+            white.push((rq * a.cos(), rq * a.sin()));
+        }
+    }
+    let mut black = vec![(0.0, 0.0)];
+    for i in 0..4 {
+        let a = 2.0 * std::f64::consts::PI * i as f64 / 8.0;
+        black.push((0.5 * spec.r_bullseye * a.cos(), 0.5 * spec.r_bullseye * a.sin()));
+    }
+    (white, black)
+}
+
+/// Per-cell thresholds for the shadow retry: white level as a linear plane
+/// over canonical coords (fitted to the quiet rings), black = ratio * white
+/// with the ratio taken at the bullseye. Returns per-cell (mid, span) closures'
+/// coefficients: (a, b, c, ratio), or None on contrast/validity failure.
+fn plane_refs(gray: &Gray, h: &M3, spec: &MarkerSpec) -> Option<(f64, f64, f64, f64)> {
+    let (white, black_pts) = plane_ref_points(spec);
+    let mut rows: Vec<f64> = Vec::with_capacity(16 * 3);
+    let mut rhs: Vec<f64> = Vec::with_capacity(16);
+    for &(x, y) in &white {
+        let (px, py) = project(h, x, y);
+        let (v, ok) = sample(gray, px, py);
+        if ok {
+            rows.extend_from_slice(&[x, y, 1.0]);
+            rhs.push(v);
+        }
+    }
+    if rhs.len() < 6 {
+        return None;
+    }
+    let (bx, by) = (black_pts[0].0, black_pts[0].1);
+    let (pbx, pby) = project(h, bx, by);
+    let (_, center_ok) = sample(gray, pbx, pby);
+    if !center_ok {
+        return None;
+    }
+    let mut bsum = 0f64;
+    let mut bcnt = 0usize;
+    for &(x, y) in &black_pts {
+        let (px, py) = project(h, x, y);
+        let (v, ok) = sample(gray, px, py);
+        if ok {
+            bsum += v;
+            bcnt += 1;
+        }
+    }
+    let n = rhs.len();
+    let (coef, _) = crate::fitellipse::lstsq(&rows, n, 3, &rhs);
+    let w0 = coef[2];
+    let black = bsum / bcnt as f64;
+    if (w0 - black).abs() < 20.0 {
+        return None;
+    }
+    let ratio = (black / w0.max(1e-6)).clamp(0.0, 0.9);
+    Some((coef[0], coef[1], coef[2], ratio))
+}
+
+/// Sample cells in `range` with the plane thresholds (shadow retry).
+fn sample_cells_plane(
+    gray: &Gray,
+    h: &M3,
+    spec: &MarkerSpec,
+    pat: &SamplePattern,
+    plane: (f64, f64, f64, f64),
+    range: std::ops::Range<usize>,
+    grid: &mut [u8],
+    conf: &mut [f32],
+) -> bool {
+    let (pa, pb, pc, ratio) = plane;
+    let _ = spec;
+    for cell in range {
+        let mut sum = 0f64;
+        let mut cnt = 0usize;
+        let mut cxs = 0f64;
+        let mut cys = 0f64;
+        for k in 0..pat.sub {
+            let (x, y) = pat.xy[cell * pat.sub + k];
+            cxs += x;
+            cys += y;
+            let (px, py) = project(h, x, y);
+            let (v, ok) = sample(gray, px, py);
+            if ok {
+                sum += v;
+                cnt += 1;
+            }
+        }
+        if cnt == 0 {
+            return false;
+        }
+        let m = sum / cnt as f64;
+        let wcell = (pa * cxs / pat.sub as f64 + pb * cys / pat.sub as f64 + pc).max(1.0);
+        let mid = 0.5 * (1.0 + ratio) * wcell;
+        let span = (0.5 * (1.0 - ratio) * wcell).max(1e-6);
+        grid[cell] = (m < mid) as u8;
+        conf[cell] = (((m - mid).abs() / span).min(1.0)) as f32;
+    }
+    true
+}
+
 /// Black/white reference levels for a grid hypothesis: bullseye center vs the
 /// white quiet ring. Returns (mid, span), or None on missing contrast.
 fn grid_refs(gray: &Gray, h: &M3, pat: &SamplePattern) -> Option<(f64, f64)> {
@@ -537,6 +646,8 @@ const DECONV_LAMBDA: f64 = 0.01;
 const MOTION_COHERENCE_MIN: f64 = 0.25;
 const MOTION_MAX_PX: f64 = 320.0;
 const MOTION_LENGTHS: [f64; 6] = [6.0, 10.0, 14.0, 18.0, 23.0, 28.0];
+// Shadow retry (illumination-plane thresholds); see detect.py.
+const SHADOW_MIN_PX: f64 = 48.0;
 
 /// Crop the candidate (1.5x its ellipse), pad edge-replicate to pow2, and
 /// Wiener-deconvolve a Gaussian PSF. Returns (patch, T) with T the
@@ -777,6 +888,16 @@ fn try_decode_spec(
     spec: &'static MarkerSpec,
     conf_erasure: f32,
 ) -> Option<DecodeHit> {
+    try_decode_spec_with(gray, hs, spec, conf_erasure, false)
+}
+
+fn try_decode_spec_with(
+    gray: &Gray,
+    hs: &[M3],
+    spec: &'static MarkerSpec,
+    conf_erasure: f32,
+    plane: bool, // shadow retry: per-cell illumination-plane thresholds
+) -> Option<DecodeHit> {
     let step = 2.0 * std::f64::consts::PI / spec.sector_count as f64;
     let (pat, rpat) = patterns_for(spec);
     let sync_min = 0.70 * spec.sector_count as f64;
@@ -786,13 +907,32 @@ fn try_decode_spec(
             for k in 0..6 {
                 let phi0 = step * k as f64 / 6.0;
                 let hphi = rotate_h(&hs_, phi0);
-                let (mid, span) = match grid_refs(gray, &hphi, pat) {
-                    Some(v) => v,
-                    None => continue,
-                };
                 let ncells = spec.ring_count * spec.sector_count;
                 let mut grid = vec![0u8; ncells];
                 let mut conf = vec![0f32; ncells];
+                // Reference levels: global pair, or the shadow retry's plane.
+                let (mid, span, pl) = if plane {
+                    match plane_refs(gray, &hphi, spec) {
+                        Some(p) => (0.0, 0.0, Some(p)),
+                        None => continue,
+                    }
+                } else {
+                    match grid_refs(gray, &hphi, pat) {
+                        Some((m, s)) => (m, s, None),
+                        None => continue,
+                    }
+                };
+                let fill = |range: std::ops::Range<usize>,
+                            grid: &mut [u8],
+                            conf: &mut [f32]|
+                 -> bool {
+                    match pl {
+                        Some(p) => sample_cells_plane(gray, &hphi, spec, pat, p,
+                                                      range, grid, conf),
+                        None => sample_cells(gray, &hphi, pat, mid, span,
+                                             range, grid, conf),
+                    }
+                };
                 // Sync-first: sample only the sync ring, gate on it, and build
                 // the rest of the grid only for survivors. Every attempt that
                 // fails here also failed (as a continue) in the whole-grid
@@ -800,8 +940,7 @@ fn try_decode_spec(
                 // wrong-variant / clutter attempts now stop after 1/3-1/5 of
                 // the sampling work.
                 let sync_score = if spec.has_sync {
-                    if !sample_cells(gray, &hphi, pat, mid, span,
-                                     0..spec.sector_count, &mut grid, &mut conf) {
+                    if !fill(0..spec.sector_count, &mut grid, &mut conf) {
                         continue;
                     }
                     let (_, scores) = codec::find_rotation(&grid[..spec.sector_count], spec);
@@ -809,14 +948,12 @@ fn try_decode_spec(
                     if best < sync_min {
                         continue;
                     }
-                    if !sample_cells(gray, &hphi, pat, mid, span,
-                                     spec.sector_count..ncells, &mut grid, &mut conf) {
+                    if !fill(spec.sector_count..ncells, &mut grid, &mut conf) {
                         continue;
                     }
                     best / spec.sector_count as f64
                 } else {
-                    if !sample_cells(gray, &hphi, pat, mid, span,
-                                     0..ncells, &mut grid, &mut conf) {
+                    if !fill(0..ncells, &mut grid, &mut conf) {
                         continue;
                     }
                     -1.0
@@ -990,6 +1127,16 @@ pub fn detect_markers(
                 path = "motion";
             }
         }
+        // Shadow retry: illumination-plane thresholds (see detect.py).
+        if hit.is_none() && geom1.major.max(geom1.minor) >= SHADOW_MIN_PX {
+            for sp in specs {
+                hit = try_decode_spec_with(work_gray, &hs, sp, conf_erasure, true);
+                if hit.is_some() {
+                    path = "shadow";
+                    break;
+                }
+            }
+        }
         if hit.is_none() && (cand.inner.is_none() || !pose_only) {
             return None;
         }
@@ -1151,6 +1298,16 @@ pub fn detect(
                     path = "motion";
                     (hit, geom1)
                 });
+        }
+        // Shadow retry (see detect_markers)
+        if found.is_none() && geom1.major.max(geom1.minor) >= SHADOW_MIN_PX {
+            for sp in specs {
+                if let Some(hit) = try_decode_spec_with(work_gray, &hs, sp, conf_erasure, true) {
+                    found = Some((hit, geom1));
+                    path = "shadow";
+                    break;
+                }
+            }
         }
         found.map(|(hit, g)| {
             let (r, t) = pose::decompose_h(&hit.chosen_h, k);

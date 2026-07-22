@@ -51,6 +51,17 @@ MOTION_DECONV = True
 MOTION_COHERENCE_MIN = 0.25  # gate: skip still/isotropic candidates (cheap)
 MOTION_MAX_PX = 320          # patch FFT cost cap (pad <= 512)
 MOTION_LENGTHS = (6, 10, 14, 18, 23, 28)  # assumed smear lengths (px)
+# Shadow retry: the primary grid builder thresholds every cell against ONE
+# global black/white reference pair, which misclassifies half the grid when a
+# hard illumination step (shadow edge) crosses the tag. On failure, retry the
+# search with per-cell thresholds from a white-illumination PLANE fitted to
+# both quiet rings (8 angles each), black estimated multiplicatively from the
+# bullseye. Retry-only: at the range floor the quiet-ring samples are
+# ISI-contaminated and the plane is WORSE than the global refs (measured:
+# 30px 17/20 -> 9/20 if used as primary), so the primary path is untouched.
+# Measured on 0.3x-0.4x half-plane shadows: 9-14/20 -> 20/20.
+SHADOW_RETRY = True
+SHADOW_MIN_PX = 48           # skip floor-sized candidates (plane fit unreliable)
 # NOTE: no upsampling before the FFT -- measured STRICTLY BETTER than cubic
 # 2x/3x upsample variants (up=3 cost D@7.5m 29->19/30; cubic overshoot is
 # amplified by the Wiener filter), and native-res sampling keeps the Rust port
@@ -538,6 +549,64 @@ def _build_grid(gray, H, spec):
     return grid, conf
 
 
+_REF_PLANE_CACHE = {}
+
+
+def _plane_ref_points(spec):
+    """Canonical sample points for the illumination-plane fit: both quiet
+    rings at 8 angles (white), bullseye center + 4 interior points (black)."""
+    key = id(spec)
+    hit = _REF_PLANE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    ang = np.linspace(0, 2 * np.pi, 8, endpoint=False)
+    rq1 = (spec.R_BULLSEYE + spec.R_DATA_IN) / 2
+    rq2 = (spec.R_DATA_OUT + spec.R_RING_IN) / 2
+    wx = np.concatenate([rq1 * np.cos(ang), rq2 * np.cos(ang)])
+    wy = np.concatenate([rq1 * np.sin(ang), rq2 * np.sin(ang)])
+    bx = np.concatenate([[0.0], 0.5 * spec.R_BULLSEYE * np.cos(ang[:4])])
+    by = np.concatenate([[0.0], 0.5 * spec.R_BULLSEYE * np.sin(ang[:4])])
+    _REF_PLANE_CACHE[key] = (wx, wy, bx, by)
+    return _REF_PLANE_CACHE[key]
+
+
+def _build_grid_plane(gray, H, spec):
+    """
+    Shadow-tolerant grid builder (see SHADOW_RETRY): white level modeled as a
+    linear plane w(x,y) over canonical coords fitted to the quiet rings; black
+    level as ratio*w(x,y) with the ratio taken at the bullseye (illumination
+    is multiplicative, so the black/white ratio is position-invariant).
+    """
+    X, Y, _ = _cell_sample_points(spec)
+    wx, wy, bx, by = _plane_ref_points(spec)
+    pxw, pyw = _project(H, wx, wy)
+    vw, okw = _sample_many(gray, pxw, pyw)
+    pxb, pyb = _project(H, bx, by)
+    vb, okb = _sample_many(gray, pxb, pyb)
+    if okw.sum() < 6 or not okb[0]:
+        return None, None
+    A = np.stack([wx[okw], wy[okw], np.ones(int(okw.sum()))], axis=1)
+    coef, *_ = np.linalg.lstsq(A, vw[okw], rcond=None)
+    w0 = float(coef[2])
+    black = float(np.mean(vb[okb]))
+    if abs(w0 - black) < 20:
+        return None, None
+    ratio = max(0.0, min(0.9, black / max(w0, 1e-6)))
+    xs, ys = _project(H, X, Y)
+    vals, valid = _sample_many(gray, xs, ys)
+    cnt = valid.sum(axis=2)
+    if (cnt == 0).any():
+        return None, None
+    m = np.where(valid, vals, 0.0).sum(axis=2) / cnt
+    wcell = np.maximum(coef[0] * X.mean(axis=2) + coef[1] * Y.mean(axis=2)
+                       + coef[2], 1.0)
+    mid = 0.5 * (1.0 + ratio) * wcell
+    span = np.maximum(0.5 * (1.0 - ratio) * wcell, 1e-6)
+    grid = (m < mid).astype(np.int8)
+    conf = np.minimum(1.0, np.abs(m - mid) / span).astype(np.float32)
+    return grid, conf
+
+
 def _rotate_H(H, dphi):
     """Compose H with an in-plane rotation of the marker (about its normal)."""
     c, s = np.cos(dphi), np.sin(dphi)
@@ -667,7 +736,7 @@ def _refine_phase(gray, Hbase, spec, theta0, ref_grid):
     return float(ths2[int(np.argmax(cs2))]), vc
 
 
-def _try_decode_spec(gray, Hs, spec, conf_erasure):
+def _try_decode_spec(gray, Hs, spec, conf_erasure, build=None):
     """
     Attempt a Simittag decode of ONE variant across the 2-fold pose solutions, a few
     radial scales, and the sub-cell phase. Returns (decoded, chosen_H) or (None,None).
@@ -675,13 +744,16 @@ def _try_decode_spec(gray, Hs, spec, conf_erasure):
     HAS_SYNC variants gate on the sync ring (CRC8 alone leaks across the search);
     no-sync variants (T) rely on RS minimum-distance + CRC, which is enough for the
     tiny grid (brute-force rotation lives in codec.decode).
+    build: grid builder (default _build_grid; _build_grid_plane for the shadow retry).
     """
+    if build is None:
+        build = _build_grid
     step = 2 * np.pi / spec.SECTOR_COUNT
     for H in Hs:
         for scale in (1.0, 1.06, 1.12, 0.94):
             Hs_ = H @ np.diag([scale, scale, 1.0])
             for phi0 in np.linspace(0, step, 6, endpoint=False):
-                grid, conf = _build_grid(gray, _rotate_H(Hs_, phi0), spec)
+                grid, conf = build(gray, _rotate_H(Hs_, phi0), spec)
                 if grid is None:
                     continue
                 if spec.HAS_SYNC:
@@ -861,6 +933,14 @@ def detect_markers(gray, spec=None, K=None, conf_erasure=0.25, versions=None,
             decoded, H = _try_motion_deconv(gray, geom1, Hs, specs, conf_erasure)
             if decoded is not None:
                 chosen_H = H
+        # Shadow retry: per-cell illumination-plane thresholds (SHADOW_RETRY).
+        if decoded is None and SHADOW_RETRY and max(MA, ma) >= SHADOW_MIN_PX:
+            for sp in specs:
+                decoded, H = _try_decode_spec(gray, Hs, sp, conf_erasure,
+                                              build=_build_grid_plane)
+                if decoded is not None:
+                    chosen_H = H
+                    break
         # Relaxed gates let lone round contours through; show a POSE-ONLY box only when
         # there's a concentric child (real nested-ring marker). A decoded marker is
         # always kept. This keeps the range win without spraying boxes on stray circles.
@@ -956,6 +1036,14 @@ def detect(gray, spec=None, K=None, conf_erasure=0.25, versions=None, dist=None)
             decoded, H = _try_motion_deconv(gray, geom1, Hs, specs, conf_erasure)
             if decoded is not None:
                 hit = (decoded, H, geom1)
+        # Shadow retry (see detect_markers)
+        if hit is None and SHADOW_RETRY and max(MA, ma) >= SHADOW_MIN_PX:
+            for sp in specs:
+                decoded, H = _try_decode_spec(gray, Hs, sp, conf_erasure,
+                                              build=_build_grid_plane)
+                if decoded is not None:
+                    hit = (decoded, H, geom1)
+                    break
         if hit is None:
             continue
         decoded, H, g = hit
