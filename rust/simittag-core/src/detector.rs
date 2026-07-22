@@ -645,7 +645,7 @@ const DECONV_LAMBDA: f64 = 0.01;
 // still tags / clutter measure coherence <=~0.32, motion >=12px smear >=0.39.
 const MOTION_COHERENCE_MIN: f64 = 0.25;
 const MOTION_MAX_PX: f64 = 320.0;
-const MOTION_LENGTHS: [f64; 6] = [6.0, 10.0, 14.0, 18.0, 23.0, 28.0];
+const MOTION_LENGTHS: [f64; 8] = [6.0, 10.0, 14.0, 18.0, 23.0, 28.0, 34.0, 40.0];
 // Shadow retry (illumination-plane thresholds); see detect.py.
 const SHADOW_MIN_PX: f64 = 48.0;
 

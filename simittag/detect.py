@@ -46,11 +46,11 @@ BULLSEYE_FALLBACK = True
 # <=0.06, clutter medians 0.03, motion >=12px smear measures >=0.39), retry
 # with a line-PSF Wiener filter along the estimated blur axis. Decode-verified
 # like every retry. Measured (~180px tag, 960px frame, tilt 15, >=90% decode):
-# motion tolerance M 18 -> 30px smear, D 12 -> 24px, T 30 -> ~36px.
+# motion tolerance M 18 -> 30px smear, D 12 -> 24px, T 30 -> 42px.
 MOTION_DECONV = True
 MOTION_COHERENCE_MIN = 0.25  # gate: skip still/isotropic candidates (cheap)
 MOTION_MAX_PX = 320          # patch FFT cost cap (pad <= 512)
-MOTION_LENGTHS = (6, 10, 14, 18, 23, 28)  # assumed smear lengths (px)
+MOTION_LENGTHS = (6, 10, 14, 18, 23, 28, 34, 40)  # assumed smear lengths (px)
 # Shadow retry: the primary grid builder thresholds every cell against ONE
 # global black/white reference pair, which misclassifies half the grid when a
 # hard illumination step (shadow edge) crosses the tag. On failure, retry the
