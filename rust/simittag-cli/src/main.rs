@@ -467,6 +467,11 @@ fn candidates_match(
             };
             // alt absent from older fixture files -> treat missing key as null
             let alt_want = w.get("alt").cloned().unwrap_or(J::Null);
+            let small_want = w.get("bullseye_only")
+                .and_then(|v| v.as_bool()).unwrap_or(false);
+            if g.bullseye_only != small_want {
+                continue;
+            }
             if sub_ok(&g.inner, &w["inner"]) && sub_ok(&g.alt, &alt_want) {
                 used[wi] = true;
                 hit = true;

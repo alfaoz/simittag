@@ -349,10 +349,25 @@ def _find_marker_ellipses(gray):
         return False
 
     cands = []
+    smalls = []
     for i, ei in enumerate(ell):
-        if ei is None or ei[3] < 8:           # was 15px; small markers are valid
+        if ei is None or ei[3] < 4:           # was 15px; small markers are valid
             continue
         if has_round_ancestor(i):             # inner ring of an already-kept tag
+            continue
+        if ei[3] < 8:
+            # BULLSEYE-ONLY rescue candidates: a partially occluded tag loses
+            # its outer-ring contour, and below ~73px tag diameter the intact
+            # bullseye fits under the 8px candidate floor -- so no candidate
+            # exists at all and the bullseye fallback never runs (measured:
+            # 10-20% occlusion at 72px = 0/25 decodes). Lone round contours of
+            # 4-8px are admitted ONLY into that fallback (cheap ring-contrast
+            # gate first, decode-verified as always); they skip the normal
+            # decode ladder and never produce pose-only boxes, so the cost is
+            # bounded and the zero-FP gates are unchanged. Restores 60-96px
+            # occlusion tolerance; below ~55px the bullseye conic is too
+            # imprecise to carry the grid regardless of gates.
+            smalls.append((ei[:4], None, None, True))
             continue
         # AprilTag lesson: do NOT require a separately-contoured concentric child. At
         # range the bullseye is only a few px and never gets its own clean contour, so
@@ -374,7 +389,7 @@ def _find_marker_ellipses(gray):
         alts = [k for k in kids if k[3] <= 0.9 * ei[3]]
         alt = max(alts, key=lambda k: k[3]) if alts else None
         alt_geom = (alt[0], alt[1], alt[2]) if alt is not None else None
-        cands.append((ei[:4], inner_geom, alt_geom))
+        cands.append((ei[:4], inner_geom, alt_geom, False))
     cands.sort(key=lambda e: -e[0][3])  # largest outer edge first
     pruned = []
     for e in cands:
@@ -388,7 +403,17 @@ def _find_marker_ellipses(gray):
     # a max-simultaneous-tags limit; 512 covers dense calibration boards (an 18x13
     # grid is 234 tags) while still bounding worst-case cost (each candidate costs
     # specs x scales x phase decode attempts). Mirrored in rust frontend.rs.
-    return pruned[:512]
+    smalls.sort(key=lambda e: -e[0][3])
+    spruned = []
+    for e in smalls:
+        eo = e[0]
+        if all(not (abs(eo[3]-p[0][3])/max(p[0][3], 1e-9) < 0.18 and
+                    np.hypot(eo[0][0]-p[0][0][0], eo[0][1]-p[0][0][1]) < 0.25*p[0][3])
+               for p in spruned):
+            spruned.append(e)
+    # Small rescue candidates are capped separately (they only feed the cheap
+    # ring-contrast-gated bullseye fallback, but noise can produce many).
+    return pruned[:512] + spruned[:64]
 
 
 def _needs_inverted_view(gray, candidates, K):
@@ -397,7 +422,11 @@ def _needs_inverted_view(gray, candidates, K):
     radii = np.concatenate([np.full(12, 0.26), np.full(12, 1.08)])
     X = radii * np.tile(np.cos(angles), 2)
     Y = radii * np.tile(np.sin(angles), 2)
-    for ei, inner, _alt in candidates:
+    for ei, inner, _alt, small in candidates:
+        if small:
+            # bullseye-only rescue candidates carry no outer-ring geometry;
+            # the canonical radii below would sample the wrong regions.
+            continue
         geom = (ei[0], ei[1], ei[2])
         Hs = pose.pose_homographies(geom, K)
         if not Hs:
@@ -857,11 +886,31 @@ def detect_markers(gray, spec=None, K=None, conf_erasure=0.25, versions=None,
     specs = resolve_specs(versions)
     out = []
     candidates = _candidate_views(gray, K)
-    for (ei, inner, alt), gray, inverted in candidates:
+    for (ei, inner, alt, small), gray, inverted in candidates:
         geom0 = (ei[0], ei[1], ei[2])
         geom1 = _refine_ellipse(gray, geom0)
         (cx, cy), (MA, ma), ang = geom1
         Hs = pose.pose_homographies(geom1, K)
+        if small:
+            # bullseye-only rescue path (see _find_marker_ellipses): the only
+            # hypothesis tried is "this small disk is a tag's bullseye".
+            if not Hs:
+                continue
+            decoded, H, outer_geom = _try_bullseye_fallback(
+                gray, Hs, specs, conf_erasure)
+            if decoded is None:
+                continue
+            chosen_H = H
+            if outer_geom is not None:
+                geom1 = outer_geom
+                (cx, cy), (MA, ma), ang = geom1
+            R, t = pose.decompose_H(chosen_H, K)
+            rec = {"center": (cx, cy), "axes": (MA, ma), "angle": ang,
+                   "R": R, "t": t, "tilt_deg": pose.tilt_from_H(chosen_H, K),
+                   "decoded": True, "inverted": inverted}
+            rec["variant"], (rec["mode"], rec["value"]) = decoded
+            out.append(rec)
+            continue
         # At the range floor (marker ~decode-floor px) the discrete decode search is
         # marginal against the sync gate, and sub-0.1px geometry differences decide it
         # (measured: even the GT ellipse only scores 0.83). Refined-first preserves
@@ -991,11 +1040,28 @@ def detect(gray, spec=None, K=None, conf_erasure=0.25, versions=None, dist=None)
     specs = resolve_specs(versions)
     results = []
     candidates = _candidate_views(gray, K)
-    for (ei, _inner, alt), gray, inverted in candidates:
+    for (ei, _inner, alt, small), gray, inverted in candidates:
         geom0 = (ei[0], ei[1], ei[2])
         geom1 = _refine_ellipse(gray, geom0)
         (cx, cy), (MA, ma), ang = geom1
         Hs = pose.pose_homographies(geom1, K)
+        if small:
+            # bullseye-only rescue path (see _find_marker_ellipses)
+            if not Hs:
+                continue
+            decoded, H, outer_geom = _try_bullseye_fallback(
+                gray, Hs, specs, conf_erasure)
+            if decoded is None:
+                continue
+            g = outer_geom if outer_geom is not None else geom1
+            variant, (mode, value) = decoded
+            results.append({
+                "variant": variant, "mode": mode, "value": value,
+                "center": g[0], "axes": g[1], "angle": g[2],
+                "tilt_deg": pose.tilt_from_H(H, K), "H": H,
+                "inverted": inverted,
+            })
+            continue
         if geom1 is not geom0 and max(MA, ma) < 100:
             # coarse-fit decode fallback near the range floor (see detect_markers)
             Hs = Hs + pose.pose_homographies(geom0, K)

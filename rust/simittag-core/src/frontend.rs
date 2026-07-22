@@ -16,6 +16,10 @@ pub struct Candidate {
     /// (<= 0.9 r): the decode fallback for a tag inside a circular sticker,
     /// where the sticker edge -- not the tag ring -- is the outermost contour.
     pub alt: Option<EllipseGeom>,
+    /// 4-8px lone round contour admitted ONLY into the bullseye fallback
+    /// (occlusion rescue for 60-96px tags whose outer ring is broken);
+    /// skips the normal decode ladder and pose-only reporting.
+    pub bullseye_only: bool,
 }
 
 struct Fitted {
@@ -91,12 +95,24 @@ pub fn find_marker_ellipses(sharp: &Gray) -> Vec<Candidate> {
     }
 
     let mut cands: Vec<Candidate> = Vec::new();
+    let mut smalls: Vec<Candidate> = Vec::new();
     for i in 0..cnts.len() {
         let f = match &ell[i] {
-            Some(f) if f.r >= 8.0 => f,
+            Some(f) if f.r >= 4.0 => f,
             _ => continue,
         };
         if has_round_ancestor(i) {
+            continue;
+        }
+        if f.r < 8.0 {
+            // bullseye-only rescue candidate (see detect.py for calibration)
+            smalls.push(Candidate {
+                outer: f.geom,
+                outer_r: f.r,
+                inner: None,
+                alt: None,
+                bullseye_only: true,
+            });
             continue;
         }
         let mut kids = Vec::new();
@@ -119,6 +135,7 @@ pub fn find_marker_ellipses(sharp: &Gray) -> Vec<Candidate> {
             outer_r: f.r,
             inner: inner.map(|f2| f2.geom),
             alt: alt.map(|f2| f2.geom),
+            bullseye_only: false,
         });
     }
     // largest outer edge first (stable, like Python's list.sort)
@@ -138,5 +155,21 @@ pub fn find_marker_ellipses(sharp: &Gray) -> Vec<Candidate> {
     // max-simultaneous-tags cap, mirrored from detect.py (512 covers dense
     // calibration boards; an 18x13 grid is 234 tags)
     pruned.truncate(512);
+    // small rescue candidates: separate dedup + cap, appended after normals
+    smalls.sort_by(|a, b| b.outer_r.partial_cmp(&a.outer_r).unwrap());
+    let mut spruned: Vec<Candidate> = Vec::new();
+    for e in smalls {
+        let dup = spruned.iter().any(|p| {
+            (e.outer_r - p.outer_r).abs() / p.outer_r.max(1e-9) < 0.18
+                && ((e.outer.cx - p.outer.cx).powi(2) + (e.outer.cy - p.outer.cy).powi(2))
+                    .sqrt()
+                    < 0.25 * p.outer_r
+        });
+        if !dup {
+            spruned.push(e);
+        }
+    }
+    spruned.truncate(64);
+    pruned.extend(spruned);
     pruned
 }

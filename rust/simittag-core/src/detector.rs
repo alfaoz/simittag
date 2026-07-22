@@ -153,6 +153,11 @@ fn ring_median(gray: &Gray, h: &M3, radius: f64) -> Option<f64> {
 /// evidence. Sorting by the detected inner center rejects the wrong conic pose.
 fn needs_inverted_view(gray: &Gray, candidates: &[Candidate], k: &M3) -> bool {
     for cand in candidates {
+        if cand.bullseye_only {
+            // rescue candidates carry no outer-ring geometry; the canonical
+            // radii below would sample the wrong regions (mirror detect.py)
+            continue;
+        }
         let mut hs = pose::pose_homographies(&cand.outer, k);
         if hs.is_empty() {
             continue;
@@ -1060,6 +1065,31 @@ pub fn detect_markers(
         if hs.is_empty() {
             return None;
         }
+        if cand.bullseye_only {
+            // bullseye-only rescue path (see detect.py): the only hypothesis
+            // tried is "this small disk is a tag's bullseye"; refined-H only.
+            let hit = bullseye_retry(work_gray, &hs, specs, conf_erasure)?;
+            let geom_rep = ellipse_from_h(&hit.chosen_h);
+            let (r, t) = pose::decompose_h(&hit.chosen_h, k);
+            return Some(Detection {
+                center: (geom_rep.cx, geom_rep.cy),
+                axes: (geom_rep.major, geom_rep.minor),
+                angle: geom_rep.angle_deg,
+                r,
+                t,
+                h: hit.chosen_h,
+                tilt_deg: pose::tilt_from_h(&hit.chosen_h, k),
+                inverted: *inverted,
+                info: Some(DecodeInfo {
+                    rs_erasures: hit.rs.erasures,
+                    rs_corrected: hit.rs.corrected,
+                    verify_corr: hit.verify_corr,
+                    sync_score: hit.sync_score,
+                    path: "bullseye",
+                }),
+                decoded: Some((hit.variant, hit.mode, hit.value)),
+            });
+        }
         if let Some(inner) = &cand.inner {
             let origin_err = |h: &M3| -> f64 {
                 let hinv = mat::inv3(h);
@@ -1247,6 +1277,33 @@ pub fn detect(
         let refined = refine_ellipse(work_gray, &geom0);
         let geom1 = refined.unwrap_or(geom0);
         let mut hs = pose::pose_homographies(&geom1, k);
+        if cand.bullseye_only {
+            // bullseye-only rescue path (see detect.py): refined-H only
+            if hs.is_empty() {
+                return None;
+            }
+            let hit = bullseye_retry(work_gray, &hs, specs, conf_erasure)?;
+            let g = ellipse_from_h(&hit.chosen_h);
+            let (r, t) = pose::decompose_h(&hit.chosen_h, k);
+            return Some(Detection {
+                center: (g.cx, g.cy),
+                axes: (g.major, g.minor),
+                angle: g.angle_deg,
+                r,
+                t,
+                h: hit.chosen_h,
+                tilt_deg: pose::tilt_from_h(&hit.chosen_h, k),
+                inverted: *inverted,
+                info: Some(DecodeInfo {
+                    rs_erasures: hit.rs.erasures,
+                    rs_corrected: hit.rs.corrected,
+                    verify_corr: hit.verify_corr,
+                    sync_score: hit.sync_score,
+                    path: "bullseye",
+                }),
+                decoded: Some((hit.variant, hit.mode, hit.value)),
+            });
+        }
         if refined.is_some() && geom1.major.max(geom1.minor) < 100.0 {
             hs.extend(pose::pose_homographies(&geom0, k));
         }
