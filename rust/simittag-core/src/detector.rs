@@ -272,12 +272,9 @@ fn refine_sample_points(spec: &MarkerSpec) -> SamplePattern {
 // _build_grid
 // ---------------------------------------------------------------------------
 
-fn build_grid(
-    gray: &Gray,
-    h: &M3,
-    spec: &MarkerSpec,
-    pat: &SamplePattern,
-) -> Option<(Vec<u8>, Vec<f32>)> {
+/// Black/white reference levels for a grid hypothesis: bullseye center vs the
+/// white quiet ring. Returns (mid, span), or None on missing contrast.
+fn grid_refs(gray: &Gray, h: &M3, pat: &SamplePattern) -> Option<(f64, f64)> {
     let (bx, by) = project(h, 0.0, 0.0);
     let (qx, qy) = project(h, pat.rho_q, 0.0);
     let (bv, bok) = sample(gray, bx, by);
@@ -285,12 +282,22 @@ fn build_grid(
     if !bok || !qok || (qv - bv).abs() < 20.0 {
         return None;
     }
-    let mid = 0.5 * (bv + qv);
-    let span = (qv - bv).abs() / 2.0;
-    let ncells = spec.ring_count * spec.sector_count;
-    let mut grid = vec![0u8; ncells];
-    let mut conf = vec![0f32; ncells];
-    for cell in 0..ncells {
+    Some((0.5 * (bv + qv), (qv - bv).abs() / 2.0))
+}
+
+/// Sample the cells in `range` into grid/conf. False = some cell had no valid
+/// subsample (the whole-grid build fails in that case, exactly as before).
+fn sample_cells(
+    gray: &Gray,
+    h: &M3,
+    pat: &SamplePattern,
+    mid: f64,
+    span: f64,
+    range: std::ops::Range<usize>,
+    grid: &mut [u8],
+    conf: &mut [f32],
+) -> bool {
+    for cell in range {
         let mut sum = 0f64;
         let mut cnt = 0usize;
         for k in 0..pat.sub {
@@ -303,13 +310,13 @@ fn build_grid(
             }
         }
         if cnt == 0 {
-            return None;
+            return false;
         }
         let m = sum / cnt as f64;
         grid[cell] = (m < mid) as u8;
         conf[cell] = (((m - mid).abs() / span).min(1.0)) as f32;
     }
-    Some((grid, conf))
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -638,18 +645,40 @@ fn try_decode_spec(
             let hs_ = scale_h(h, scale);
             for k in 0..6 {
                 let phi0 = step * k as f64 / 6.0;
-                let (grid, conf) = match build_grid(gray, &rotate_h(&hs_, phi0), spec, pat) {
+                let hphi = rotate_h(&hs_, phi0);
+                let (mid, span) = match grid_refs(gray, &hphi, pat) {
                     Some(v) => v,
                     None => continue,
                 };
+                let ncells = spec.ring_count * spec.sector_count;
+                let mut grid = vec![0u8; ncells];
+                let mut conf = vec![0f32; ncells];
+                // Sync-first: sample only the sync ring, gate on it, and build
+                // the rest of the grid only for survivors. Every attempt that
+                // fails here also failed (as a continue) in the whole-grid
+                // order, so decode decisions are unchanged; the bulk of
+                // wrong-variant / clutter attempts now stop after 1/3-1/5 of
+                // the sampling work.
                 let sync_score = if spec.has_sync {
+                    if !sample_cells(gray, &hphi, pat, mid, span,
+                                     0..spec.sector_count, &mut grid, &mut conf) {
+                        continue;
+                    }
                     let (_, scores) = codec::find_rotation(&grid[..spec.sector_count], spec);
                     let best = *scores.iter().max().unwrap() as f64;
                     if best < sync_min {
                         continue;
                     }
+                    if !sample_cells(gray, &hphi, pat, mid, span,
+                                     spec.sector_count..ncells, &mut grid, &mut conf) {
+                        continue;
+                    }
                     best / spec.sector_count as f64
                 } else {
+                    if !sample_cells(gray, &hphi, pat, mid, span,
+                                     0..ncells, &mut grid, &mut conf) {
+                        continue;
+                    }
                     -1.0
                 };
                 let (res, sh) = codec::decode_conf(&grid, spec, &conf, conf_erasure);
