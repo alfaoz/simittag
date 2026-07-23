@@ -24,6 +24,9 @@ python3 -m simittag.gf16
 python3 -m simittag.spec
 python3 -m simittag.codec
 python3 -m simittag.payload
-python3 -m unittest discover -s tests -v
+# pytest collects both the unittest-style detector suite and the
+# function-style calibration tests (unittest discover silently skipped the
+# latter -- they only ran ad hoc before)
+python3 -m pytest tests -q
 
 echo "ALL CHECKS PASSED"

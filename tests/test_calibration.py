@@ -11,26 +11,47 @@ from marker.generate import render
 
 
 def test_descriptor_roundtrip():
-    raw = board_mod.pack_descriptor(board_mod.FAMILY_GRID, 30.0, 22.0, 8, 6)
-    assert len(raw) == 8
+    # v1 (sim48c8 boards): byte-frozen 8-byte form, no variant byte
+    raw = board_mod.pack_descriptor(board_mod.FAMILY_GRID, 30.0, 22.0, 8, 6,
+                                    variant="sim48c8")
+    assert len(raw) == 8 and raw[0] == 1
     d = board_mod.unpack_descriptor(raw)
     assert d == {"family": 1, "pitch_mm": 30.0, "diameter_mm": 22.0,
-                 "rows": 8, "cols": 6}
-    # descriptor payload must actually fit a D tag RAW body (9 bytes)
-    pl = payload.encode_raw(raw, VARIANTS["D"])
-    mode, value = payload.decode(pl, VARIANTS["D"])
-    assert (mode, value) == ("RAW", raw)
+                 "rows": 8, "cols": 6, "variant": "sim48c8"}
+    # v2 (default s4k boards): trailing variant code
+    raw2 = board_mod.pack_descriptor(board_mod.FAMILY_GRID, 30.0, 22.0, 8, 6)
+    assert len(raw2) == 9 and raw2[0] == 2 and raw2[1:8] == raw[1:8]
+    d2 = board_mod.unpack_descriptor(raw2)
+    assert d2["variant"] == "sim48c12"
+    assert {k: d2[k] for k in d if k != "variant"} == \
+        {k: d[k] for k in d if k != "variant"}
+    # both descriptor forms must fit an sdata RAW body (max 9 bytes)
+    for r in (raw, raw2):
+        pl = payload.encode_raw(r, VARIANTS["D"])
+        mode, value = payload.decode(pl, VARIANTS["D"])
+        assert (mode, value) == ("RAW", r)
+
+
+def test_board_from_descriptor_variants():
+    for variant in ("sim48c8", "sim48c12", "sim48c16"):
+        b = board_mod.grid_board(30.0, 22.0, 4, 4, variant=variant)
+        b2 = board_mod.board_from_descriptor(b.descriptor_raw)
+        assert b2.tags[0].variant == variant
 
 
 def test_grid_board_geometry():
     b = board_mod.grid_board(30.0, 22.0, 8, 6)
-    assert len(b.tags) == 48 and b.tags[0].variant == "sim48c8"
-    assert b.point_for("T", "ID", 0) == (0.0, 0.0)      # deprecated letter accepted
-    assert b.point_for("T", "ID", 7) == (30.0, 30.0)      # row 1, col 1
-    assert b.point_for("T", "ID", 47) == (150.0, 210.0)   # row 7, col 5
-    assert b.point_for("T", "ID", 48) is None
-    # >256 points auto-switches to variant M
-    big = board_mod.grid_board(30.0, 22.0, 17, 17)
+    assert len(b.tags) == 48 and b.tags[0].variant == "sim48c12"  # s4k default
+    assert b.point_for("s4k", "ID", 0) == (0.0, 0.0)      # alias accepted
+    assert b.point_for("sim48c12", "ID", 7) == (30.0, 30.0)   # row 1, col 1
+    assert b.point_for("s4k", "ID", 47) == (150.0, 210.0)     # row 7, col 5
+    assert b.point_for("s4k", "ID", 48) is None
+    # explicit legacy variant still generates s256 boards (deprecated letter)
+    legacy = board_mod.grid_board(30.0, 22.0, 8, 6, variant="T")
+    assert legacy.tags[0].variant == "sim48c8"
+    assert legacy.point_for("T", "ID", 7) == (30.0, 30.0)
+    # beyond the s4k ID space (4096) auto-switches to variant s16m
+    big = board_mod.grid_board(30.0, 22.0, 65, 65)
     assert big.tags[0].variant == "sim96c32"
 
 
@@ -38,6 +59,7 @@ def test_multiscale_board_geometry():
     b = board_mod.multiscale_board(27.0, 20.0, 4, 7)
     # 7 top + 7 bottom + 4 left + 4 right + anchor
     assert len(b.tags) == 23
+    assert b.tags[0].variant == "sim48c12"    # s4k perimeter by default
     anchor = b.point_for("M", "ID", board_mod.MULTISCALE_ANCHOR_ID)
     w = 6 * 27.0
     h = 5 * 27.0 * board_mod.SIDE_STEP_RATIO
@@ -46,13 +68,17 @@ def test_multiscale_board_geometry():
 
 
 def test_js_board_json_parity():
-    """The web generator's sidecar must agree with board.py tag-for-tag."""
+    """The web generator's sidecar must agree with board.py tag-for-tag.
+    These sidecars predate the s4k default; they are the pinned LEGACY
+    loader coverage, so the reference boards pin variant sim48c8."""
     import pathlib
     fixtures = pathlib.Path(__file__).resolve().parent.parent / "fixtures"
     for path, make in [
-        ("board_grid_a4.json", lambda: board_mod.grid_board(30.0, 22.0, 8, 6)),
+        ("board_grid_a4.json",
+         lambda: board_mod.grid_board(30.0, 22.0, 8, 6, variant="sim48c8")),
         ("board_multiscale_a4.json",
-         lambda: board_mod.multiscale_board(27.0, 20.0, 4, 7)),
+         lambda: board_mod.multiscale_board(27.0, 20.0, 4, 7,
+                                            variant="sim48c8")),
     ]:
         loaded = board_mod.load_board(fixtures / path)
         ref = make()
@@ -91,7 +117,10 @@ def _board_raster(board):
     h = int(round((max(ys) - min(ys) + 2 * rmax) * PX_PER_MM))
     img = np.full((h, w), 255, np.uint8)
     for t in board.tags:
-        pl = payload.encode_id(t.value, VARIANTS[t.variant])
+        if t.mode == "RAW":
+            pl = payload.encode_raw(t.value, VARIANTS[t.variant])
+        else:
+            pl = payload.encode_id(t.value, VARIANTS[t.variant])
         size = int(round(t.diameter_mm * 1.24 * PX_PER_MM))  # incl. 12% margin
         tile = render(pl, VARIANTS[t.variant], size=size, supersample=2)
         cx = (t.x_mm - x0) * PX_PER_MM
@@ -100,6 +129,16 @@ def _board_raster(board):
         img[py:py + size, px:px + size] = np.minimum(
             img[py:py + size, px:px + size], tile)
     return img, x0, y0
+
+
+def _with_descriptor(board):
+    """Append the sheet's sdata descriptor tag, like a studio sheet carries."""
+    xs = [t.x_mm for t in board.tags]
+    ys = [t.y_mm for t in board.tags]
+    board.tags.append(board_mod.BoardTag(
+        "sim180c88", "RAW", board.descriptor_raw,
+        min(xs), max(ys) + 55.0, 36.0))
+    return board
 
 
 def _view(img, x0, y0, K, rvec, tvec, out_size):
@@ -137,6 +176,61 @@ def test_synthetic_calibration_recovers_intrinsics():
     intr.save("/tmp/simittag-test-intrinsics.json")
     back = CameraIntrinsics.load("/tmp/simittag-test-intrinsics.json")
     assert back.fx == intr.fx and back.K[0, 2] == intr.cx
+
+
+def _views_of(board):
+    img, x0, y0 = _board_raster(board)
+    K_true = np.array([[900.0, 0, 640.0], [0, 900.0, 400.0], [0, 0, 1]])
+    out = (1280, 800)
+    poses = [(0.00, 0.00, 0.0), (0.25, 0.10, 0.1), (-0.22, 0.18, -0.1),
+             (0.15, -0.25, 0.2), (-0.10, -0.20, -0.2), (0.30, 0.25, 0.0)]
+    return [_view(img, x0, y0, K_true, np.array([rx, ry, rz]),
+                  np.array([-95.0, -110.0, 420.0]), out)
+            for rx, ry, rz in poses]
+
+
+def test_calibration_descriptor_self_config_s4k():
+    # A generated (s4k-default) sheet with its v2 descriptor tag must
+    # calibrate from photos alone: default BOARD_VERSIONS decodes the grid,
+    # find_board reconstructs the layout from the descriptor.
+    board = _with_descriptor(board_mod.grid_board(50.0, 40.0, 4, 3))
+    assert board.tags[0].variant == "sim48c12"
+    intr = calibrate(_views_of(board))
+    assert intr.views >= 5
+    assert abs(intr.fx - 900) / 900 < 0.02
+    assert intr.rms_px < 1.5
+
+
+def test_calibration_descriptor_self_config_legacy_s256():
+    # A legacy sheet (s256 tags, v1 descriptor) under the s4k-default
+    # BOARD_VERSIONS: the first pass decodes only the sdata descriptor; the
+    # v1 semantics reconstruct an s256 board and trigger the re-detection
+    # with the board's own variant set. The sheet must still calibrate.
+    board = _with_descriptor(
+        board_mod.grid_board(50.0, 40.0, 4, 3, variant="sim48c8"))
+    assert board.tags[0].variant == "sim48c8"
+    assert board.descriptor_raw[0] == 1
+    intr = calibrate(_views_of(board))
+    assert intr.views >= 5
+    assert abs(intr.fx - 900) / 900 < 0.02
+    assert intr.rms_px < 1.5
+
+
+def test_s4k_board_sidecar_fixture():
+    # The committed s4k sidecar (studio format, canonical names) must load
+    # and agree with board.py's s4k default generator tag-for-tag.
+    import pathlib
+    fixtures = pathlib.Path(__file__).resolve().parent.parent / "fixtures"
+    loaded = board_mod.load_board(fixtures / "board_grid_s4k_a4.json")
+    ref = board_mod.grid_board(30.0, 22.0, 8, 6)
+    got = {(t.variant, t.mode, t.value): (t.x_mm, t.y_mm, t.diameter_mm)
+           for t in loaded.tags if t.mode == "ID"}
+    want = {(t.variant, t.mode, t.value): (t.x_mm, t.y_mm, t.diameter_mm)
+            for t in ref.tags}
+    assert got == want
+    descs = [t for t in loaded.tags if t.mode == "RAW"]
+    assert len(descs) == 1 and descs[0].value == ref.descriptor_raw
+    assert descs[0].value[0] == 2      # v2 descriptor carrying sim48c12
 
 
 def test_calibrate_rejects_too_few_views():
