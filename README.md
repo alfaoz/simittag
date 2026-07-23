@@ -235,11 +235,11 @@ Timings for a 1280x1280 frame containing six tags, variant auto-detection on, me
 | Detector | Time |
 |---|---:|
 | Rust native (rayon) | ~5 ms |
-| WASM, threaded (8 workers) | ~15 ms |
-| WASM, single-thread + SIMD | ~35 ms |
+| WASM, threaded (14 workers) | ~19 ms |
+| WASM, single-thread + SIMD | ~23 ms |
 | Python reference (OpenCV, 14 threads) | ~65 ms |
 
-These timings are for the default variant set detecting its own tags (s4k, s16m, sdata; the s4k tags decode on the first spec tried). A detector configured for the legacy s256/s16m/sdata set measures about 6 ms on the equivalent frame. These timings are for normal black-on-white scenes. White-on-black or mixed-polarity scenes add a second threshold/contour pass; it is triggered from candidate contrast rather than paid on every frame.
+These timings are for the default variant set detecting its own tags (s4k, s16m, sdata; the s4k tags decode on the first spec tried). A detector configured for the legacy s256/s16m/sdata set measures about 6 ms native and about 26 ms in single-threaded WASM on the equivalent frame; the threaded WASM build currently gets slower than single-threaded on that configuration (its per-parallel-section overhead outweighs the parallelism when more of the frame time is failed-spec scanning), so single-thread is the safe WASM default when variants beyond the default set are enabled. These timings are for normal black-on-white scenes. White-on-black or mixed-polarity scenes add a second threshold/contour pass; it is triggered from candidate contrast rather than paid on every frame.
 
 Detection Range
 ===============
