@@ -1051,7 +1051,7 @@ def detect(gray, spec=None, K=None, conf_erasure=0.25, versions=None, dist=None)
     specs = resolve_specs(versions)
     results = []
     candidates = _candidate_views(gray, K)
-    for (ei, _inner, alt, small), gray, inverted in candidates:
+    for (ei, inner, alt, small), gray, inverted in candidates:
         geom0 = (ei[0], ei[1], ei[2])
         geom1 = _refine_ellipse(gray, geom0)
         (cx, cy), (MA, ma), ang = geom1
@@ -1074,11 +1074,23 @@ def detect(gray, spec=None, K=None, conf_erasure=0.25, versions=None, dist=None)
                 "inverted": inverted,
             })
             continue
-        if geom1 is not geom0 and max(MA, ma) < 100:
-            # coarse-fit decode fallback near the range floor (see detect_markers)
-            Hs = Hs + pose.pose_homographies(geom0, K)
+        # coarse-fit decode fallback near the range floor (see detect_markers)
+        Hs_coarse = (pose.pose_homographies(geom0, K)
+                     if geom1 is not geom0 and max(MA, ma) < 100 else [])
         if not Hs:
             continue
+        # Disambiguate the 2-fold pose ambiguity with the detected bullseye
+        # center, exactly as detect_markers does. Decode success is an OR over
+        # the Hs attempts, so the sort cannot change any decode decision; it
+        # decides which mirror decodes FIRST and therefore the reported pose.
+        if inner is not None:
+            icx, icy = inner[0]
+            def _origin_err(H):
+                p = np.linalg.inv(H) @ np.array([icx, icy, 1.0])
+                return np.hypot(p[0]/p[2], p[1]/p[2])
+            Hs = sorted(Hs, key=_origin_err)
+            Hs_coarse = sorted(Hs_coarse, key=_origin_err)
+        Hs = Hs + Hs_coarse
         hit = None
         for sp in specs:
             decoded, H = _try_decode_spec(gray, Hs, sp, conf_erasure)
@@ -1088,9 +1100,11 @@ def detect(gray, spec=None, K=None, conf_erasure=0.25, versions=None, dist=None)
         if hit is None and alt is not None:
             # circular-sticker fallback (see detect_markers)
             alt1 = _refine_ellipse(gray, alt)
+            Hs_alt = pose.pose_homographies(alt1, K)
+            if inner is not None:
+                Hs_alt = sorted(Hs_alt, key=_origin_err)
             for sp in specs:
-                decoded, H = _try_decode_spec(gray, pose.pose_homographies(alt1, K),
-                                              sp, conf_erasure)
+                decoded, H = _try_decode_spec(gray, Hs_alt, sp, conf_erasure)
                 if decoded is not None:
                     hit = (decoded, H, alt1)
                     break
