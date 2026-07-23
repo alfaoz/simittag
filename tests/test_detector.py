@@ -353,6 +353,28 @@ class DetectorRegressionTests(unittest.TestCase):
                         f"deg (mirror sort regressed?)")
         self.assertLess(float(np.median(errors)), 0.2)
 
+    def test_s4k_erasure_threshold_fixture(self):
+        # A ~30%-occluded 96px s4k tag that decodes ONLY with the shipped
+        # CONF_ERASURE=0.40: the occluder-covered cells read near mid-level
+        # (confidence 0.25-0.40), which the old 0.25 detector default refuses
+        # to erase. Restoring the old threshold must fail the frame, proving
+        # the pin exercises the config (not vacuous). NOTES R4.5.
+        import dataclasses
+        from simittag import spec as specmod
+        image = cv2.imread(str(ROOT / "fixtures/frames/occl_eras_S4K.png"),
+                           cv2.IMREAD_GRAYSCALE)
+        K = detect.default_K(1080, 1080)
+        K[0, 0] = K[1, 1] = (1920 / 2) / np.tan(np.radians(60.0) / 2)
+        results = detect.detect(image, K=K, versions="s4k")
+        self.assertEqual([(r["variant"], r["value"]) for r in results],
+                         [("sim48c12", 0xABC)])
+        legacy = dataclasses.replace(specmod.S4K_SPEC, CONF_ERASURE=None)
+        dict.__setitem__(specmod.VARIANTS, "sim48c12", legacy)
+        try:
+            self.assertEqual(detect.detect(image, K=K, versions="s4k"), [])
+        finally:
+            dict.__setitem__(specmod.VARIANTS, "sim48c12", specmod.S4K_SPEC)
+
     def test_radial_clutter_does_not_decode(self):
         for frame_index, image in _radial_clutter_frames():
             with self.subTest(frame=frame_index):

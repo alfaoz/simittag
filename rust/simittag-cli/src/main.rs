@@ -98,9 +98,13 @@ fn parity_spec(path: &str) -> bool {
             _ => false,
         };
         g.check(vmin_ok, || format!("{} VERIFY_MIN", sp.name));
+        // exact at the field's working precision: the detector consumes an
+        // f32, so the fixture's f64 literal must round to EXACTLY this f32
+        // (no f32 lies between 0.4f64 and 0.4f32, so the erasure decision
+        // itself is bit-identical across the representations)
         let ce_ok = match (&sp.conf_erasure, &f["CONF_ERASURE"]) {
             (None, J::Null) => true,
-            (Some(v), w) => w.as_f64().map(|x| (x - *v as f64).abs() < 1e-9).unwrap_or(false),
+            (Some(v), w) => w.as_f64().map(|x| x as f32 == *v).unwrap_or(false),
             _ => false,
         };
         g.check(ce_ok, || format!("{} CONF_ERASURE", sp.name));
