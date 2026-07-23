@@ -236,11 +236,21 @@ D_SPEC = MarkerSpec(
 #   the sync patterns + codec + verify gate; SYNC below was chosen jointly
 #   with the family for cross-correlation margin (worst |cross| 6 vs the
 #   sync gate's 12, all shifts and polarities) and autocorr sidelobe 4.
+#   Erasure config (run 4, paired-frame audit -- NOTES R4.5): ranked
+#   erasures are LOAD-BEARING for the nibble variants under occlusion
+#   (disabling them costs s64k -161/600 at 20% occlusion), and raising the
+#   confidence threshold to 0.40 strictly helps: occluder-covered cells
+#   read near mid-level with conf ~0.25-0.40, which the default 0.25
+#   threshold refuses to erase. Measured (identical frames, n=600/cell):
+#   30% occlusion +44/600 (s64k) and +27..40/600 (s4k) vs the 0.25
+#   default; floor band, def20, shadow all within noise; zero added wrong
+#   IDs (the frontier saturates at ~0.5 and s64k logs its first wrong
+#   there, so 0.40 is the chosen point).
 S64K_SPEC = MarkerSpec(
     NAME="sim48c16", ALIAS="s64k", RING_COUNT=3, SECTOR_COUNT=16, HAS_SYNC=True,
     SYMBOL_BITS=4, RS_K=5, RS_NSYM=3, USE_HEADER=False,
     SYNC=(0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0),
-    VERIFY_MIN=0.78,
+    VERIFY_MIN=0.78, CONF_ERASURE=0.40,
 )
 
 # sim48c12 / s4k -- EXPERIMENTAL 12-bit-ID tracking tag at s256-class range:
@@ -252,11 +262,12 @@ S64K_SPEC = MarkerSpec(
 #   correction for false accepts (NOTES R3.6). Sync chosen jointly with the
 #   family for cross-correlation margin; carries the same raised verify
 #   floor as sim48c16.
+#   Same 0.40 erasure threshold as sim48c16 (see the audit note there).
 S4K_SPEC = MarkerSpec(
     NAME="sim48c12", ALIAS="s4k", RING_COUNT=3, SECTOR_COUNT=16, HAS_SYNC=True,
     SYMBOL_BITS=4, RS_K=4, RS_NSYM=4, USE_HEADER=False,
     SYNC=(1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0),
-    VERIFY_MIN=0.78,
+    VERIFY_MIN=0.78, CONF_ERASURE=0.40,
 )
 
 # Deprecated pre-0.2 letters, still accepted as input (never emitted).
