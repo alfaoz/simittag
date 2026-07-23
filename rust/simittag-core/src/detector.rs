@@ -1307,12 +1307,29 @@ pub fn detect(
                 decoded: Some((hit.variant, hit.mode, hit.value)),
             });
         }
-        if refined.is_some() && geom1.major.max(geom1.minor) < 100.0 {
-            hs.extend(pose::pose_homographies(&geom0, k));
-        }
+        // coarse-fit decode fallback near the range floor (see detect_markers)
+        let mut hs_coarse = if refined.is_some() && geom1.major.max(geom1.minor) < 100.0 {
+            pose::pose_homographies(&geom0, k)
+        } else {
+            Vec::new()
+        };
         if hs.is_empty() {
             return None;
         }
+        // 2-fold pose disambiguation via the detected bullseye center, exactly
+        // as detect_markers: decode success is an OR over the Hs attempts, so
+        // the sort cannot change a decode decision, only which mirror decodes
+        // FIRST and therefore the reported pose.
+        if let Some(inner) = &cand.inner {
+            let origin_err = |h: &M3| -> f64 {
+                let hinv = mat::inv3(h);
+                let p = mat::matvec(&hinv, &[inner.cx, inner.cy, 1.0]);
+                ((p[0] / p[2]).powi(2) + (p[1] / p[2]).powi(2)).sqrt()
+            };
+            hs.sort_by(|a, b| origin_err(a).partial_cmp(&origin_err(b)).unwrap());
+            hs_coarse.sort_by(|a, b| origin_err(a).partial_cmp(&origin_err(b)).unwrap());
+        }
+        hs.extend(hs_coarse);
         let mut path = "direct";
         let mut found: Option<(DecodeHit, EllipseGeom)> = None;
         for sp in specs {
@@ -1325,7 +1342,15 @@ pub fn detect(
             if let Some(alt) = &cand.alt {
                 // circular-sticker fallback (see detect_markers)
                 let alt1 = refine_ellipse(work_gray, alt).unwrap_or(*alt);
-                let hs_alt = pose::pose_homographies(&alt1, k);
+                let mut hs_alt = pose::pose_homographies(&alt1, k);
+                if let Some(inner) = &cand.inner {
+                    let origin_err = |h: &M3| -> f64 {
+                        let hinv = mat::inv3(h);
+                        let p = mat::matvec(&hinv, &[inner.cx, inner.cy, 1.0]);
+                        ((p[0] / p[2]).powi(2) + (p[1] / p[2]).powi(2)).sqrt()
+                    };
+                    hs_alt.sort_by(|a, b| origin_err(a).partial_cmp(&origin_err(b)).unwrap());
+                }
                 for sp in specs {
                     if let Some(hit) = try_decode_spec(work_gray, &hs_alt, sp, conf_erasure) {
                         found = Some((hit, alt1));

@@ -11,11 +11,75 @@ import cv2
 import numpy as np
 
 from marker.generate import render
-from simittag import codec, detect, payload
+from simittag import codec, detect, payload, pose
 from simittag.spec import VARIANTS
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _rot_xyz(tilt_deg, pan_deg, roll_deg):
+    """Marker->camera rotation, the sim rig's convention (Rz @ Ry @ Rx)."""
+    tx, ty, tz = np.radians([tilt_deg, pan_deg, roll_deg])
+    Rx = np.array([[1, 0, 0], [0, np.cos(tx), -np.sin(tx)],
+                   [0, np.sin(tx), np.cos(tx)]])
+    Ry = np.array([[np.cos(ty), 0, np.sin(ty)], [0, 1, 0],
+                   [-np.sin(ty), 0, np.cos(ty)]])
+    Rz = np.array([[np.cos(tz), -np.sin(tz), 0],
+                   [np.sin(tz), np.cos(tz), 0], [0, 0, 1]])
+    return Rz @ Ry @ Rx
+
+
+def _gt_tilt(R):
+    normal = R @ np.array([0.0, 0.0, 1.0])
+    return float(np.degrees(np.arccos(min(1.0, abs(normal[2])))))
+
+
+def _fov_K(out, fov_deg):
+    f = (out / 2) / np.tan(np.radians(fov_deg) / 2)
+    c = (out - 1) / 2.0
+    return np.array([[f, 0, c], [0, f, c], [0, 0, 1.0]])
+
+
+def _render_pose(spec, value, x, y, z, tilt, pan, roll, K, out, noise_seed):
+    """Project a marker at an arbitrary 6-DoF pose (the sim rig's model: the
+    marker image spans a 1x1 world square) with light degradation."""
+    marker = render(payload.encode_id(value, spec), spec, size=512)
+    R = _rot_xyz(tilt, pan, roll)
+    t = np.array([x, y, z], dtype=np.float64)
+    size = marker.shape[0]
+    src = np.float32([[0, 0], [size, 0], [size, size], [0, size]])
+    world = np.float32([[u / size - 0.5, v / size - 0.5, 0] for u, v in src])
+    cam = (R @ world.T).T + t
+    proj = (K @ cam.T).T
+    dst = (proj[:, :2] / proj[:, 2:3]).astype(np.float32)
+    H = cv2.getPerspectiveTransform(src, dst)
+    img = cv2.warpPerspective(marker, H, (out, out), flags=cv2.INTER_AREA,
+                              borderMode=cv2.BORDER_CONSTANT,
+                              borderValue=255).astype(np.float32)
+    rng = np.random.default_rng(noise_seed)
+    img = cv2.GaussianBlur(img, (0, 0), 1.0) + rng.normal(0, 3.0, img.shape)
+    img = np.clip(img, 0, 255).astype(np.uint8)
+    _, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return cv2.imdecode(enc, cv2.IMREAD_GRAYSCALE), R
+
+
+def _unsorted_mirror_tilt(gray, K, spec):
+    """Emulate the pre-run-4 headless path (R3.13): conic-order Hs, no
+    bullseye origin_err sort, first decode wins. Used to keep the pose-mirror
+    pins live: the fixture must still discriminate sorted from unsorted."""
+    for (ei, _inner, _alt, small), g, _inv in detect._candidate_views(gray, K):
+        if small:
+            continue
+        geom0 = (ei[0], ei[1], ei[2])
+        geom1 = detect._refine_ellipse(g, geom0)
+        Hs = pose.pose_homographies(geom1, K)
+        if geom1 is not geom0 and max(geom1[1]) < 100:
+            Hs = Hs + pose.pose_homographies(geom0, K)
+        decoded, H = detect._try_decode_spec(g, Hs, spec, 0.25)
+        if decoded is not None:
+            return pose.tilt_from_H(H, K)
+    return None
 
 
 def _naive_render(payload_bytes, spec, size, supersample, margin):
@@ -239,6 +303,55 @@ class DetectorRegressionTests(unittest.TestCase):
             self.assertEqual(detect.detect(image, K=K, versions="s256"), [])
         finally:
             dict.__setitem__(specmod.VARIANTS, "sim48c8", specmod.T_SPEC)
+
+    def test_offaxis_pose_mirror_fixture(self):
+        # The R3.13 pin: an off-center healthy tag whose tilt+pan flip the
+        # conic eigen-order. Headless detect() must pick the correct mirror
+        # (bullseye origin_err sort, like detect_markers always did); the
+        # unsorted emulation must still pick the WRONG one, proving the frame
+        # discriminates and the pin stays live.
+        image = cv2.imread(str(ROOT / "fixtures/frames/offaxis_M_pose.png"),
+                           cv2.IMREAD_GRAYSCALE)
+        K = _fov_K(1280, 55)
+        gt = _gt_tilt(_rot_xyz(8.6, 11.2, 60.6))
+        results = detect.detect(image, K=K, versions="sim96c32")
+        self.assertEqual([(r["variant"], r["value"]) for r in results],
+                         [("sim96c32", 0xBEE5)])
+        self.assertLess(abs(results[0]["tilt_deg"] - gt), 1.0)
+        markers = detect.detect_markers(image, K=K, versions="sim96c32")
+        self.assertLess(abs(markers[0]["tilt_deg"] - gt), 1.0)
+        wrong = _unsorted_mirror_tilt(image, K, VARIANTS["sim96c32"])
+        self.assertIsNotNone(wrong)
+        self.assertGreater(abs(wrong - gt), 5.0,
+                           "unsorted emulation no longer flips the mirror; "
+                           "the fixture has gone vacuous")
+
+    def test_offaxis_pose_regression_slice(self):
+        # mass1200-style slice: 24 deterministic off-axis poses biased into
+        # the mirror-flip region (low tilt, strong pan, corner positions).
+        # Pre-fix headless detect() takes the wrong mirror on ~2/24 of these
+        # (p95 tilt error ~8 deg); the sorted path must stay sub-degree.
+        spec = VARIANTS["sim96c32"]
+        K = _fov_K(960, 55)
+        rng = np.random.default_rng(41)
+        errors = []
+        for i in range(24):
+            x = float(rng.choice([-0.85, 0.85]))
+            y = float(rng.choice([-0.85, 0.0, 0.85]))
+            tilt = float(rng.uniform(6, 22))
+            pan = float(rng.choice([-1, 1]) * rng.uniform(7, 12))
+            roll = float(rng.uniform(0, 360))
+            gray, R = _render_pose(spec, 0x1000 + i, x, y, 3.6,
+                                   tilt, pan, roll, K, 960, 100 + i)
+            dets = detect.detect(gray, K=K, versions="sim96c32")
+            self.assertEqual(len(dets), 1, f"pose {i} did not decode")
+            self.assertEqual(dets[0]["value"], 0x1000 + i)
+            errors.append(abs(dets[0]["tilt_deg"] - _gt_tilt(R)))
+        errors = np.array(errors)
+        self.assertLess(float(np.percentile(errors, 95)), 1.0,
+                        f"off-axis tilt p95 {np.percentile(errors, 95):.2f} "
+                        f"deg (mirror sort regressed?)")
+        self.assertLess(float(np.median(errors)), 0.2)
 
     def test_radial_clutter_does_not_decode(self):
         for frame_index, image in _radial_clutter_frames():

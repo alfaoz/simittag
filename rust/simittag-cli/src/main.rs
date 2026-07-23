@@ -863,6 +863,74 @@ fn parity_detect(fixtures_dir: &str) -> bool {
             }
         }
         g.check(inverted_ok, || inverted_why.clone());
+
+        // Headless detect() expectations (the frames.json "headless" section):
+        // decode identity + the same pose gates for detector::detect(), which
+        // previously had no parity coverage at all -- the gap that let the
+        // R3.13 pose-mirror bug ship in the headless path only.
+        if let Some(heads) = e["headless"].as_array() {
+            let hdets = detector::detect(&src, &k, &specs, 0.25, dist.as_deref());
+            if hdets.len() != heads.len() {
+                g.check(false, || format!("{} headless: {} dets != {}",
+                                          file, hdets.len(), heads.len()));
+                continue;
+            }
+            let mut used = vec![false; heads.len()];
+            let mut ok_all = true;
+            let mut why = String::new();
+            for d in &hdets {
+                let mut hit = false;
+                for (wi, w) in heads.iter().enumerate() {
+                    if used[wi] {
+                        continue;
+                    }
+                    let wc: Vec<f64> = w["center"].as_array().unwrap().iter()
+                        .map(|v| v.as_f64().unwrap()).collect();
+                    if ((d.center.0 - wc[0]).powi(2) + (d.center.1 - wc[1]).powi(2))
+                        .sqrt() > 2.0 {
+                        continue;
+                    }
+                    let dec_ok = match &d.decoded {
+                        Some((var, mode, val)) => {
+                            *var == w["variant"].as_str().unwrap()
+                                && *mode == w["mode"].as_str().unwrap()
+                                && value_matches_det(val, &w["value"])
+                                && d.inverted == w["inverted"].as_bool().unwrap()
+                        }
+                        None => false,
+                    };
+                    if !dec_ok {
+                        why = format!("{} headless: decode mismatch at ({:.0},{:.0})",
+                                      file, wc[0], wc[1]);
+                        continue;
+                    }
+                    let wtilt = w["tilt_deg"].as_f64().unwrap();
+                    let wt: Vec<f64> = w["t"].as_array().unwrap().iter()
+                        .map(|v| v.as_f64().unwrap()).collect();
+                    let dt_tilt = (d.tilt_deg - wtilt).abs();
+                    let dz = (d.t[2] - wt[2]).abs() / wt[2].abs().max(1e-9);
+                    worst_tilt = worst_tilt.max(dt_tilt);
+                    worst_depth = worst_depth.max(dz);
+                    if dt_tilt > 0.05 || dz > 0.001 {
+                        why = format!("{} headless: pose off (dtilt {:.4} deg, ddepth {:.4}%)",
+                                      file, dt_tilt, dz * 100.0);
+                        continue;
+                    }
+                    used[wi] = true;
+                    hit = true;
+                    break;
+                }
+                if !hit {
+                    ok_all = false;
+                    if why.is_empty() {
+                        why = format!("{} headless: unmatched detection at ({:.0},{:.0})",
+                                      file, d.center.0, d.center.1);
+                    }
+                    break;
+                }
+            }
+            g.check(ok_all, || why.clone());
+        }
     }
     println!("  worst tilt diff {:.4} deg, worst depth diff {:.4}%",
              worst_tilt, worst_depth * 100.0);
