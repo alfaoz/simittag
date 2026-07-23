@@ -11,14 +11,23 @@ itself from the sheet alone. The studio (web/) also writes a JSON sidecar with
 explicit per-tag positions; when available it is the preferred source of truth
 (it also locates the descriptor tag itself, adding one more point per view).
 
-Descriptor RAW payload (8 bytes, version 1):
+Descriptor RAW payload:
 
+  version 1 (8 bytes, FROZEN -- every pre-0.3 sheet):
   [0] version (1)
   [1] family  (1 = grid, 2 = multiscale)
   [2:4] pitch  in 0.1 mm, big-endian   (grid: cell pitch; multiscale: frame step)
   [4:6] tag diameter in 0.1 mm, big-endian
   [6] rows    (grid: rows; multiscale: side tags per column)
   [7] cols    (grid: cols; multiscale: tags per top/bottom row)
+  A v1 descriptor implies sim48c8 grid/perimeter tags (what those sheets
+  carry); its byte layout and that meaning never change.
+
+  version 2 (9 bytes): the v1 fields with version=2 plus
+  [8] variant code of the grid/perimeter tags (VARIANT_CODES below).
+  Boards of the current default variant (sim48c12) and any future variant
+  are described by v2; pack_descriptor still emits v1 for sim48c8 boards so
+  legacy sheets and sidecars stay byte-identical.
 
 Layout algorithms per family are frozen here and mirrored in web/js/calib.js;
 a descriptor fully determines every tag position.
@@ -30,9 +39,19 @@ from dataclasses import dataclass, field
 from .spec import normalize_variant
 
 DESCRIPTOR_VERSION = 1
+DESCRIPTOR_VERSION_V2 = 2
 FAMILY_GRID = 1
 FAMILY_MULTISCALE = 2
 FAMILY_NAMES = {FAMILY_GRID: "grid", FAMILY_MULTISCALE: "multiscale"}
+
+# Default variant for generated boards (the fleet's tracking tag). sim48c8
+# remains fully supported by explicit selection; loaders normalize any
+# accepted spelling.
+DEFAULT_BOARD_VARIANT = "sim48c12"
+
+# v2 descriptor variant codes (frozen once assigned; never reuse).
+VARIANT_CODES = {0: "sim48c12", 1: "sim48c8", 2: "sim96c32", 3: "sim48c16"}
+CODE_OF_VARIANT = {v: k for k, v in VARIANT_CODES.items()}
 
 # multiscale layout constants (frozen, v1): the center anchor is a sim96c32 tag with
 # this id, ANCHOR_RATIO times the perimeter tag diameter; side tags are spaced
@@ -72,34 +91,59 @@ class Board:
 
     @property
     def descriptor_raw(self) -> bytes:
+        variant = self.tags[0].variant if self.tags else DEFAULT_BOARD_VARIANT
         return pack_descriptor(self.family, self.pitch_mm, self.diameter_mm,
-                               self.rows, self.cols)
+                               self.rows, self.cols, variant=variant)
 
 
-def pack_descriptor(family, pitch_mm, diameter_mm, rows, cols) -> bytes:
+def pack_descriptor(family, pitch_mm, diameter_mm, rows, cols,
+                    variant=DEFAULT_BOARD_VARIANT) -> bytes:
     p, d = round(pitch_mm * 10), round(diameter_mm * 10)
     if not (0 < p < 65536 and 0 < d < 65536 and 0 < rows < 256 and 0 < cols < 256):
         raise ValueError("board parameters out of descriptor range")
-    return bytes([DESCRIPTOR_VERSION, family, p >> 8, p & 0xFF,
-                  d >> 8, d & 0xFF, rows, cols])
+    variant = normalize_variant(variant)
+    head = [family, p >> 8, p & 0xFF, d >> 8, d & 0xFF, rows, cols]
+    if variant == "sim48c8":
+        # legacy sheets/sidecars stay byte-identical (v1 implies sim48c8)
+        return bytes([DESCRIPTOR_VERSION] + head)
+    if variant not in CODE_OF_VARIANT:
+        raise ValueError(f"variant {variant} has no descriptor code")
+    return bytes([DESCRIPTOR_VERSION_V2] + head + [CODE_OF_VARIANT[variant]])
 
 
 def unpack_descriptor(raw: bytes) -> dict:
-    if len(raw) < 8 or raw[0] != DESCRIPTOR_VERSION:
-        raise ValueError(f"not a v{DESCRIPTOR_VERSION} board descriptor")
+    if len(raw) < 8 or raw[0] not in (DESCRIPTOR_VERSION, DESCRIPTOR_VERSION_V2):
+        raise ValueError("not a v1/v2 board descriptor")
     family = raw[1]
     if family not in FAMILY_NAMES:
         raise ValueError(f"unknown board family {family}")
+    if raw[0] == DESCRIPTOR_VERSION:
+        variant = "sim48c8"                 # v1 semantics, frozen
+    else:
+        if len(raw) < 9 or raw[8] not in VARIANT_CODES:
+            raise ValueError("bad v2 descriptor variant code")
+        variant = VARIANT_CODES[raw[8]]
     return {"family": family,
             "pitch_mm": ((raw[2] << 8) | raw[3]) / 10.0,
             "diameter_mm": ((raw[4] << 8) | raw[5]) / 10.0,
-            "rows": raw[6], "cols": raw[7]}
+            "rows": raw[6], "cols": raw[7], "variant": variant}
 
 
-def grid_board(pitch_mm, diameter_mm, rows, cols) -> Board:
+def _id_capacity(variant):
+    from .spec import VARIANTS
+    sp = VARIANTS[variant]
+    return 1 << (sp.payload_bits - (8 if sp.USE_HEADER else 0))
+
+
+def grid_board(pitch_mm, diameter_mm, rows, cols, variant=None) -> Board:
     """Uniform rows x cols grid of ID tags, row-major ids from 0.
-    Variant T while ids fit in one byte, M beyond."""
-    variant = "sim48c8" if rows * cols <= 256 else "sim96c32"
+    variant=None -> the default board variant (sim48c12) while ids fit its
+    space, sim96c32 beyond; an explicit variant is used as given."""
+    if variant is None:
+        variant = (DEFAULT_BOARD_VARIANT
+                   if rows * cols <= _id_capacity(DEFAULT_BOARD_VARIANT)
+                   else "sim96c32")
+    variant = normalize_variant(variant)
     b = Board(FAMILY_GRID, pitch_mm, diameter_mm, rows, cols)
     for i in range(rows * cols):
         b.tags.append(BoardTag(variant, "ID", i,
@@ -108,21 +152,24 @@ def grid_board(pitch_mm, diameter_mm, rows, cols) -> Board:
     return b
 
 
-def multiscale_board(step_mm, diameter_mm, side_rows, top_cols) -> Board:
-    """Perimeter frame of small T tags + one large M anchor in the center.
-    Top and bottom rows have `top_cols` tags at `step_mm` pitch; each side has
-    `side_rows` tags between them at SIDE_STEP_RATIO * step_mm pitch."""
+def multiscale_board(step_mm, diameter_mm, side_rows, top_cols,
+                     variant=None) -> Board:
+    """Perimeter frame of small tracking tags + one large sim96c32 anchor in
+    the center. Top and bottom rows have `top_cols` tags at `step_mm` pitch;
+    each side has `side_rows` tags between them at SIDE_STEP_RATIO * step_mm
+    pitch. The anchor's variant and id are frozen layout constants."""
+    variant = normalize_variant(variant or DEFAULT_BOARD_VARIANT)
     b = Board(FAMILY_MULTISCALE, step_mm, diameter_mm, side_rows, top_cols)
     w = (top_cols - 1) * step_mm
     sstep = step_mm * SIDE_STEP_RATIO
     h = (side_rows + 1) * sstep
     i = 0
     for c in range(top_cols):                        # top + bottom rows
-        b.tags.append(BoardTag("sim48c8", "ID", i, c * step_mm, 0.0, diameter_mm)); i += 1
-        b.tags.append(BoardTag("sim48c8", "ID", i, c * step_mm, h, diameter_mm)); i += 1
+        b.tags.append(BoardTag(variant, "ID", i, c * step_mm, 0.0, diameter_mm)); i += 1
+        b.tags.append(BoardTag(variant, "ID", i, c * step_mm, h, diameter_mm)); i += 1
     for r in range(1, side_rows + 1):                # left + right columns
-        b.tags.append(BoardTag("sim48c8", "ID", i, 0.0, r * sstep, diameter_mm)); i += 1
-        b.tags.append(BoardTag("sim48c8", "ID", i, w, r * sstep, diameter_mm)); i += 1
+        b.tags.append(BoardTag(variant, "ID", i, 0.0, r * sstep, diameter_mm)); i += 1
+        b.tags.append(BoardTag(variant, "ID", i, w, r * sstep, diameter_mm)); i += 1
     b.tags.append(BoardTag("sim96c32", "ID", MULTISCALE_ANCHOR_ID,
                            w / 2.0, h / 2.0, diameter_mm * ANCHOR_RATIO))
     return b
@@ -131,8 +178,10 @@ def multiscale_board(step_mm, diameter_mm, side_rows, top_cols) -> Board:
 def board_from_descriptor(raw: bytes) -> Board:
     d = unpack_descriptor(raw)
     if d["family"] == FAMILY_GRID:
-        return grid_board(d["pitch_mm"], d["diameter_mm"], d["rows"], d["cols"])
-    return multiscale_board(d["pitch_mm"], d["diameter_mm"], d["rows"], d["cols"])
+        return grid_board(d["pitch_mm"], d["diameter_mm"], d["rows"], d["cols"],
+                          variant=d["variant"])
+    return multiscale_board(d["pitch_mm"], d["diameter_mm"], d["rows"],
+                            d["cols"], variant=d["variant"])
 
 
 def load_board(path) -> Board:

@@ -25,12 +25,14 @@ import cv2
 from . import detect as _detect
 from .spec import normalize_variant
 
-# Printed calibration boards are physical artifacts: every sheet in the field
-# carries s256 grid tags (+ an s16m anchor on multiscale sheets) and an sdata
-# descriptor. Calibration therefore pins ITS OWN variant set rather than
-# following the detector's default auto set — otherwise a default-set change
-# would silently break existing boards. A provided board narrows the set.
-BOARD_VERSIONS = ("sim48c8", "sim96c32", "sim180c88")
+# Calibration pins ITS OWN variant set rather than following the detector's
+# default auto set, so detector-default changes cannot silently break board
+# workflows. The default matches boards the studio generates today: s4k grid
+# or perimeter tags, an s16m multiscale anchor, an sdata descriptor. Sheets
+# of any other variant still calibrate: a provided board file narrows the
+# set to the board's own variants, and a descriptor-only sheet triggers a
+# re-detection with the descriptor's variant set (see calibrate()).
+BOARD_VERSIONS = ("sim48c12", "sim96c32", "sim180c88")
 from . import board as _board
 
 MIN_POINTS_PER_VIEW = 6
@@ -87,39 +89,56 @@ def _view_points(detections, board):
             np.array(img, dtype=np.float32))
 
 
+def _board_versions(board):
+    """The board's own variants (+ sdata for the descriptor tag)."""
+    return sorted({normalize_variant(t.variant)
+                   for t in board.tags} | {"sim180c88"})
+
+
 def calibrate(images, board=None, versions=None) -> CameraIntrinsics:
     """
     Solve intrinsics (Zhang's method via cv2.calibrateCamera) from grayscale
     images of a simittag calibration board. If `board` is None it is
-    reconstructed from the descriptor tag found on the sheet.
+    reconstructed from the descriptor tag found on the sheet; when that
+    descriptor names variants outside the initial detection set (a legacy
+    s256 sheet under the s4k default, or vice versa), the images are
+    re-detected with the board's own set, so any sheet self-configures.
     """
     if versions is not None:
         view_versions = versions
     elif board is not None:
-        # narrow to the board's own variants (+ sdata for the descriptor tag)
-        view_versions = sorted({normalize_variant(t.variant)
-                                for t in board.tags} | {"sim180c88"})
+        view_versions = _board_versions(board)
     else:
         view_versions = list(BOARD_VERSIONS)
-    obj_pts, img_pts = [], []
     size = None
     for gray in images:
         if size is None:
             size = (gray.shape[1], gray.shape[0])
         elif size != (gray.shape[1], gray.shape[0]):
             raise ValueError("all calibration images must share one resolution")
-        dets = _detect.detect(gray, versions=view_versions)
-        if board is None:
+    dets_per_view = [_detect.detect(gray, versions=view_versions)
+                     for gray in images]
+    if board is None:
+        for dets in dets_per_view:
             board = _board.find_board(dets)
-        if board is None:
-            continue
+            if board is not None:
+                break
+    if board is None:
+        raise ValueError("no board descriptor found — pass board= or use a "
+                         "sheet with a descriptor tag")
+    if versions is None:
+        needed = _board_versions(board)
+        if not set(needed) <= set(view_versions):
+            # descriptor-driven self-configuration: the sheet carries variants
+            # the initial set did not decode
+            dets_per_view = [_detect.detect(gray, versions=needed)
+                             for gray in images]
+    obj_pts, img_pts = [], []
+    for dets in dets_per_view:
         obj, img = _view_points(dets, board)
         if len(obj) >= MIN_POINTS_PER_VIEW:
             obj_pts.append(obj)
             img_pts.append(img)
-    if board is None:
-        raise ValueError("no board descriptor found — pass board= or use a "
-                         "sheet with a descriptor tag")
     if len(obj_pts) < MIN_VIEWS:
         raise ValueError(f"only {len(obj_pts)} usable view(s) "
                          f"(>= {MIN_POINTS_PER_VIEW} board tags each); "
